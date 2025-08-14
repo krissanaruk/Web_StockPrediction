@@ -4,10 +4,9 @@ import axios from 'axios';
 import OverviewChart from '../components/OverviewChart';
 import { FaArrowUp, FaArrowDown } from 'react-icons/fa';
 
-// ชี้ไปที่พอร์ต backend ที่รัน Node/Express (ส่วนใหญ่ 3000)
 const API_URL = 'http://localhost:3000/api';
 
-// --- Styled Components (เหมือนเดิม) ---
+// ======================= Styled Components =======================
 const DashboardGrid = styled.div`
   padding: 20px;
   display: grid;
@@ -55,9 +54,7 @@ const TimeframeButton = styled.button`
   transition: background-color 0.3s, color 0.3s;
   background-color: ${props => (props.active ? '#ff8c00' : 'transparent')};
   color: ${props => (props.active ? '#1e1e1e' : '#e0e0e0')};
-  &:hover {
-    background-color: ${props => (props.active ? '#ff8c00' : '#444')};
-  }
+  &:hover { background-color: ${props => (props.active ? '#ff8c00' : '#444')}; }
 `;
 const ChartCard = styled.div`
   background: #1e1e1e;
@@ -96,49 +93,18 @@ const StockItem = styled.div`
   padding: 10px 0;
   font-size: 16px;
   border-bottom: 1px solid #2a2a2a;
-  &:last-child {
-    border-bottom: none;
-  }
+  &:last-child { border-bottom: none; }
 `;
-const StockInfoContainer = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 10px;
-`;
-const StockSymbol = styled.span`
-  font-weight: bold;
-`;
-const StockPriceAndChange = styled.div`
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-`;
-const StockPrice = styled.span`
-  color: #b0b0b0;
-  font-size: 14px;
-`;
+const StockInfoContainer = styled.div` display: flex; align-items: center; gap: 10px; `;
+const StockSymbol = styled.span` font-weight: bold; `;
+const StockPriceAndChange = styled.div` display: flex; flex-direction: column; align-items: flex-end; gap: 4px; `;
+const StockPrice = styled.span` color: #b0b0b0; font-size: 14px; `;
 const StockChange = styled.span`
   color: ${props => (props.positive ? '#28a745' : '#dc3545')};
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-weight: bold;
-`;
-const StockSignalBadge = styled.span`
-  font-size: 12px;
-  font-weight: bold;
-  padding: 4px 10px;
-  border-radius: 12px;
-  color: white;
-  background-color: ${props => {
-    if (props.signal === 'BUY') return '#28a745';
-    if (props.signal === 'SELL') return '#dc3545';
-    return '#6c757d';
-  }};
+  display: flex; align-items: center; gap: 5px; font-weight: bold;
 `;
 
-// --- Main Dashboard Component ---
+// ======================= Main =======================
 function Dashboard() {
   const [selectedMarket, setSelectedMarket] = useState('Thailand');
   const [selectedStock, setSelectedStock] = useState('');
@@ -149,8 +115,6 @@ function Dashboard() {
   const [marketMoversDate, setMarketMoversDate] = useState('');
   const [isLoading, setIsLoading] = useState({ stocks: false, chart: false, movers: false });
   const [error, setError] = useState({ stocks: '', chart: '', movers: '' });
-
-  const timeframes = ['5D', '1M', '3M', '6M', '1Y', 'ALL'];
 
   const getAuthHeaders = () => {
     const token = localStorage.getItem('adminToken');
@@ -166,10 +130,7 @@ function Dashboard() {
     const numPrice = safeNumber(price, null);
     if (numPrice === null) return 'N/A';
     const currencySymbol = market === 'Thailand' ? '฿' : '$';
-    return `${currencySymbol}${numPrice.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    })}`;
+    return `${currencySymbol}${numPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
   const formatPercentage = (perc, useAbs = false) => {
@@ -178,26 +139,23 @@ function Dashboard() {
     return value.toFixed(2);
   };
 
-  // รองรับทั้ง 'YYYY-MM-DD' และ 'YYYY-MM-DDTHH:mm:ssZ'
   const formatMoversDate = (dateString) => {
     if (!dateString) return 'Latest';
     const datePart = String(dateString).split('T')[0];
-    const parts = datePart.split('-');
-    if (parts.length !== 3) return dateString;
-    const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+    const [y, m, d] = datePart.split('-').map(Number);
+    const date = new Date(Date.UTC(y, m - 1, d));
     return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   };
 
+  // ---------- โหลดรายชื่อหุ้น + market movers เมื่อเปลี่ยนตลาด ----------
   useEffect(() => {
     const fetchDataForMarket = async () => {
       if (!selectedMarket) return;
-
       setIsLoading(prev => ({ ...prev, stocks: true, movers: true }));
       setError({ stocks: '', chart: '', movers: '' });
       setMarketMoversDate('');
 
       try {
-        // ดึงรายการหุ้น + market movers พร้อมกัน
         const [stocksResponse, moversResponse] = await Promise.all([
           axios.get(`${API_URL}/stocks?market=${encodeURIComponent(selectedMarket)}`, getAuthHeaders()),
           axios.get(`${API_URL}/market-movers?market=${encodeURIComponent(selectedMarket)}`, getAuthHeaders())
@@ -208,29 +166,18 @@ function Dashboard() {
 
         const moversPayload = moversResponse?.data ?? {};
         const moversData = moversPayload?.data ?? { topGainers: [], topLosers: [] };
-
         setMarketMovers({
           topGainers: Array.isArray(moversData.topGainers) ? moversData.topGainers : [],
           topLosers: Array.isArray(moversData.topLosers) ? moversData.topLosers : []
         });
         setMarketMoversDate(moversPayload?.date || '');
 
-        // ตั้งค่าหุ้นตัวแรกใน list เป็นค่าเริ่มต้น
-        if (stocks.length > 0) {
-          setSelectedStock(stocks[0].StockSymbol);
-        } else {
-          setSelectedStock('');
-        }
+        // ตั้งค่า symbol เริ่มต้นเป็นตัวแรก
+        setSelectedStock(stocks.length > 0 ? stocks[0].StockSymbol : '');
       } catch (err) {
         console.error(`Error fetching data for ${selectedMarket}:`, err);
-        setError(prev => ({
-          ...prev,
-          stocks: 'Failed to load stock list.',
-          movers: 'Failed to load market movers.'
-        }));
-        setAvailableStocks([]);
-        setMarketMovers({ topGainers: [], topLosers: [] });
-        setSelectedStock('');
+        setError(prev => ({ ...prev, stocks: 'Failed to load stock list.', movers: 'Failed to load market movers.' }));
+        setAvailableStocks([]); setMarketMovers({ topGainers: [], topLosers: [] }); setSelectedStock('');
       } finally {
         setIsLoading(prev => ({ ...prev, stocks: false, movers: false }));
       }
@@ -239,10 +186,10 @@ function Dashboard() {
     fetchDataForMarket();
   }, [selectedMarket]);
 
+  // ---------- โหลดกราฟเมื่อเปลี่ยน symbol/timeframe ----------
   useEffect(() => {
     const fetchChartData = async () => {
       if (!selectedStock) return;
-
       setIsLoading(prev => ({ ...prev, chart: true }));
       setError(prev => ({ ...prev, chart: '' }));
       setChartData([]);
@@ -252,10 +199,13 @@ function Dashboard() {
         const response = await axios.get(endpoint, getAuthHeaders());
 
         const rows = response?.data?.data ?? [];
-        const transformedData = rows.map(item => ({
-          ...item,
-          date: new Date(item.date).getTime()
-        }));
+
+        // ✅ สร้าง date(timestamp) + dateLabel(string) เพื่อให้แกน X เว้น “เท่ากันทุกจุด”
+        const transformedData = rows.map(item => {
+          const ts = new Date(item.date).getTime();
+          const label = new Date(ts).toISOString().slice(0, 10); // YYYY-MM-DD
+          return { ...item, date: ts, dateLabel: label };
+        });
 
         setChartData(transformedData);
       } catch (err) {
@@ -269,57 +219,39 @@ function Dashboard() {
     fetchChartData();
   }, [selectedStock, selectedTimeframe]);
 
-  const handleMarketChange = (e) => {
-    const newMarket = e.target.value;
-    setSelectedMarket(newMarket);
-  };
-
   return (
     <DashboardGrid>
       <HeaderContainer>
         <Header>Dashboard Overview</Header>
-        <Selector value={selectedMarket} onChange={handleMarketChange}>
+        <Selector value={selectedMarket} onChange={(e) => setSelectedMarket(e.target.value)}>
           <option value="Thailand">Thailand (TH)</option>
           <option value="America">United States (USA)</option>
         </Selector>
         <Selector value={selectedStock} onChange={(e) => setSelectedStock(e.target.value)}>
-          {isLoading.stocks ? (
-            <option disabled>Loading...</option>
-          ) : (
-            availableStocks.map(stock => (
-              <option key={stock.StockSymbol} value={stock.StockSymbol}>
-                {stock.StockSymbol}
-              </option>
-            ))
-          )}
+          {isLoading.stocks ? <option disabled>Loading...</option> :
+            availableStocks.map(s => <option key={s.StockSymbol} value={s.StockSymbol}>{s.StockSymbol}</option>)}
         </Selector>
       </HeaderContainer>
 
       <ChartCard>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <ChartTitle>
-            {selectedStock ? `Price Chart for ${selectedStock}` : 'Select a stock to view chart'}
-          </ChartTitle>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
+          <ChartTitle>{selectedStock ? `Price Chart for ${selectedStock}` : 'Select a stock to view chart'}</ChartTitle>
           <TimeframeSelector>
-            {['5D', '1M', '3M', '6M', '1Y', 'ALL'].map(tf => (
+            {['5D','1M','3M','6M','1Y','ALL'].map(tf => (
               <TimeframeButton key={tf} active={selectedTimeframe === tf} onClick={() => setSelectedTimeframe(tf)}>
                 {tf}
               </TimeframeButton>
             ))}
           </TimeframeSelector>
         </div>
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+
+        <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center' }}>
           {isLoading.chart ? (
             <p>Loading Chart...</p>
           ) : error.chart ? (
-            <p style={{ color: 'red' }}>{error.chart}</p>
+            <p style={{ color:'red' }}>{error.chart}</p>
           ) : chartData.length > 0 ? (
-            <OverviewChart
-              data={chartData}
-              dataKey={selectedStock}
-              market={selectedMarket}
-              timeframe={selectedTimeframe}
-            />
+            <OverviewChart data={chartData} dataKey={selectedStock} market={selectedMarket} timeframe={selectedTimeframe} />
           ) : (
             <p>{selectedStock ? 'No chart data available.' : ''}</p>
           )}
@@ -327,63 +259,43 @@ function Dashboard() {
       </ChartCard>
 
       <ListCard>
-        <ListTitle>Top Gainers ({formatMoversDate(marketMoversDate)})</ListTitle>
-        {isLoading.movers ? (
-          <p>Loading...</p>
-        ) : error.movers ? (
-          <p style={{ color: 'red' }}>{error.movers}</p>
-        ) : marketMovers?.topGainers?.length > 0 ? (
-          marketMovers.topGainers.map((stock) => {
+        <ListTitle>Top Gainers</ListTitle>
+        {isLoading.movers ? <p>Loading...</p> : error.movers ? <p style={{ color:'red' }}>{error.movers}</p> :
+          (marketMovers.topGainers.length ? marketMovers.topGainers.map(stock => {
             const chg = safeNumber(stock.Changepercen, 0);
             return (
               <StockItem key={stock.StockSymbol}>
-                <StockInfoContainer>
-                  <StockSymbol>{stock.StockSymbol}</StockSymbol>
-                </StockInfoContainer>
+                <StockInfoContainer><StockSymbol>{stock.StockSymbol}</StockSymbol></StockInfoContainer>
                 <StockPriceAndChange>
                   <StockPrice>{formatPrice(stock.ClosePrice, selectedMarket)}</StockPrice>
                   <StockChange positive={chg >= 0}>
-                    {chg > 0 && <FaArrowUp />}
-                    {chg < 0 && <FaArrowDown />}
-                    {formatPercentage(chg, true)}%
+                    {chg > 0 && <FaArrowUp />} {chg < 0 && <FaArrowDown />} {Math.abs(chg).toFixed(2)}%
                   </StockChange>
                 </StockPriceAndChange>
               </StockItem>
             );
-          })
-        ) : (
-          <p style={{ textAlign: 'center', color: '#a0a0a0', marginTop: '20px' }}>No top gainers found.</p>
-        )}
+          }) : <p style={{ textAlign:'center', color:'#a0a0a0', marginTop:20 }}>No top gainers found.</p>)
+        }
       </ListCard>
 
       <ListCard>
-        <ListTitle>Top Losers ({formatMoversDate(marketMoversDate)})</ListTitle>
-        {isLoading.movers ? (
-          <p>Loading...</p>
-        ) : error.movers ? (
-          <p style={{ color: 'red' }}>{error.movers}</p>
-        ) : marketMovers?.topLosers?.length > 0 ? (
-          marketMovers.topLosers.map((stock) => {
+        <ListTitle>Top Losers</ListTitle>
+        {isLoading.movers ? <p>Loading...</p> : error.movers ? <p style={{ color:'red' }}>{error.movers}</p> :
+          (marketMovers.topLosers.length ? marketMovers.topLosers.map(stock => {
             const chg = safeNumber(stock.Changepercen, 0);
             return (
               <StockItem key={stock.StockSymbol}>
-                <StockInfoContainer>
-                  <StockSymbol>{stock.StockSymbol}</StockSymbol>
-                </StockInfoContainer>
+                <StockInfoContainer><StockSymbol>{stock.StockSymbol}</StockSymbol></StockInfoContainer>
                 <StockPriceAndChange>
                   <StockPrice>{formatPrice(stock.ClosePrice, selectedMarket)}</StockPrice>
                   <StockChange positive={chg >= 0}>
-                    {chg > 0 && <FaArrowUp />}
-                    {chg < 0 && <FaArrowDown />}
-                    {formatPercentage(chg, true)}%
+                    {chg > 0 && <FaArrowUp />} {chg < 0 && <FaArrowDown />} {Math.abs(chg).toFixed(2)}%
                   </StockChange>
                 </StockPriceAndChange>
               </StockItem>
             );
-          })
-        ) : (
-          <p style={{ textAlign: 'center', color: '#a0a0a0', marginTop: '20px' }}>No top losers found.</p>
-        )}
+          }) : <p style={{ textAlign:'center', color:'#a0a0a0', marginTop:20 }}>No top losers found.</p>)
+        }
       </ListCard>
     </DashboardGrid>
   );
