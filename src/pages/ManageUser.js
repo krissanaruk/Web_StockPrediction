@@ -252,7 +252,7 @@ function ManageUser() {
   return (
     <>
       <MainContent>
-        <Header>การจัดการผู้ใช้</Header>
+        <Header>User Management</Header>
         <TableContainer>
           {isLoading ? (
             <FeedbackMessage>Loading users...</FeedbackMessage>

@@ -1,304 +1,329 @@
-import React, { useState, useEffect } from 'react';
+// src/pages/Dashboard.js
+import React, { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
-import OverviewChart from '../components/OverviewChart';
-import { FaArrowUp, FaArrowDown } from 'react-icons/fa';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, Brush, Legend
+} from 'recharts';
+import { useNavigate } from 'react-router-dom';
 
-const API_URL = 'http://localhost:3000/api';
+/* ======================= CONFIG ======================= */
+const API_BASE = 'http://localhost:3000/api';
+const COUNTRY_TO_MARKET = { TH: 'Thailand', USA: 'America' };
+const DEFAULT_COUNTRY = 'TH';
+const DEFAULT_WINDOW = '1M';
+const MAX_SERIES = 10;
+const WINDOWS = ['5D', '1M', '3M', '6M', '1Y', 'ALL'];
 
-// ======================= Styled Components =======================
-const DashboardGrid = styled.div`
-  padding: 20px;
+const COLORS = [
+  '#ff8c00', '#0dcaf0', '#20c997', '#a78bfa', '#ef4444', '#22c55e',
+  '#f59e0b', '#3b82f6', '#eab308', '#10b981', '#f97316', '#8b5cf6'
+];
+
+const getAuthHeaders = () => {
+  const token = localStorage.getItem('adminToken');
+  return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
+};
+const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '—' : Number(v).toFixed(d));
+const mergeByDate = (seriesMap) => {
+  const idx = new Map();
+  Object.entries(seriesMap).forEach(([sym, arr]) => {
+    arr.forEach(({ date, ClosePrice }) => {
+      const label = new Date(date).toISOString().slice(0, 10);
+      if (!idx.has(label)) idx.set(label, { date: label });
+      idx.get(label)[sym] = Number(ClosePrice);
+    });
+  });
+  return Array.from(idx.values()).sort((a, b) => new Date(a.date) - new Date(b.date));
+};
+
+/* ======================= STYLED ======================= */
+const Page = styled.div` padding:20px; display:flex; flex-direction:column; gap:20px; `;
+const Title = styled.h2` color:#ff8c00; margin:0; font-size:28px; `;
+const Card = styled.div` background:#1e1e1e; border:1px solid #333; border-radius:12px; padding:16px; `;
+const HeaderRow = styled.div` display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; `;
+const Left = styled.div` display:flex; gap:10px; align-items:center; flex-wrap:wrap; `;
+const SubTitle = styled.h3` color:#ff8c00; margin:0; font-size:18px; `;
+const Select = styled.select`
+  padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.3);
+  background:#333; color:#fff; font-weight:700;
+`;
+const Segments = styled.div`
+  display:inline-flex; padding:4px; background:#2a2a2a; border:1px solid #444; border-radius:8px;
+  > button { padding:6px 12px; border:0; border-radius:6px; color:#e0e0e0; background:transparent; font-weight:800; cursor:pointer; }
+  > button.active { background:#ff8c00; color:#111; }
+`;
+const TwoCol = styled.div`
+  display:grid; grid-template-columns: 1fr 1fr; gap:16px;
+  @media (max-width: 1100px){ grid-template-columns: 1fr; }
+`;
+const ListCard = styled(Card)` max-height:420px; overflow:auto; `;
+const Row = styled.div`
+  display:flex; justify-content:space-between; padding:10px 6px; border-bottom:1px solid #2a2a2a;
+  cursor: pointer; &:hover { background:#252525; }
+`;
+const Sym = styled.span` font-weight:800; `;
+const Pct = styled.span` font-weight:800; `;
+
+/* Legend แบบกริดเรียบร้อย */
+const LegendWrap = styled.div`
   display: grid;
-  gap: 20px;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px 14px;
+  padding-top: 8px;
+  max-height: 84px;          /* กันล้นชน Brush */
+  overflow: auto;
 `;
-const HeaderContainer = styled.div`
-  display: flex;
-  justify-content: flex-start;
-  align-items: center;
-  grid-column: 1 / -1;
-  gap: 20px;
-  flex-wrap: wrap;
+const LegendItem = styled.div`
+  display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer; font-weight: 800; user-select: none; outline: none;
+  &:hover { opacity: .9; text-decoration: underline; }
 `;
-const Header = styled.h2`
-  color: #ff8c00;
-  margin: 0;
-  font-size: 28px;
-  margin-right: auto;
+const LegendDot = styled.span`
+  display:inline-block; width:8px; height:8px; border-radius:50%;
+  background: ${p => p.color || '#999'};
 `;
-const Selector = styled.select`
-  padding: 8px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  outline: none;
-  background: #333;
-  color: white;
-  font-size: 16px;
-  font-weight: bold;
-`;
-const TimeframeSelector = styled.div`
-  display: flex;
-  background-color: #2a2a2a;
-  border-radius: 8px;
-  padding: 4px;
-  border: 1px solid #444;
-`;
-const TimeframeButton = styled.button`
-  padding: 6px 16px;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-weight: bold;
-  font-size: 14px;
-  transition: background-color 0.3s, color 0.3s;
-  background-color: ${props => (props.active ? '#ff8c00' : 'transparent')};
-  color: ${props => (props.active ? '#1e1e1e' : '#e0e0e0')};
-  &:hover { background-color: ${props => (props.active ? '#ff8c00' : '#444')}; }
-`;
-const ChartCard = styled.div`
-  background: #1e1e1e;
-  padding: 20px;
-  border-radius: 12px;
-  box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-  border: 1px solid #333;
-  min-height: 450px;
-  display: flex;
-  flex-direction: column;
-  grid-column: 1 / -1;
-`;
-const ChartTitle = styled.h3`
-  color: #ff8c00;
-  margin: 0 0 15px 0;
-  font-size: 18px;
-`;
-const ListCard = styled.div`
-  background: #1e1e1e;
-  padding: 20px;
-  border-radius: 12px;
-  box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-  border: 1px solid #333;
-`;
-const ListTitle = styled.h3`
-  color: #ff8c00;
-  margin: 0 0 15px 0;
-  font-size: 18px;
-  border-bottom: 1px solid #333;
-  padding-bottom: 10px;
-`;
-const StockItem = styled.div`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 0;
-  font-size: 16px;
-  border-bottom: 1px solid #2a2a2a;
-  &:last-child { border-bottom: none; }
-`;
-const StockInfoContainer = styled.div` display: flex; align-items: center; gap: 10px; `;
-const StockSymbol = styled.span` font-weight: bold; `;
-const StockPriceAndChange = styled.div` display: flex; flex-direction: column; align-items: flex-end; gap: 4px; `;
-const StockPrice = styled.span` color: #b0b0b0; font-size: 14px; `;
-const StockChange = styled.span`
-  color: ${props => (props.positive ? '#28a745' : '#dc3545')};
-  display: flex; align-items: center; gap: 5px; font-weight: bold;
+const LegendLabel = styled.span`
+  max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 `;
 
-// ======================= Main =======================
-function Dashboard() {
-  const [selectedMarket, setSelectedMarket] = useState('Thailand');
-  const [selectedStock, setSelectedStock] = useState('');
-  const [selectedTimeframe, setSelectedTimeframe] = useState('1M');
-  const [availableStocks, setAvailableStocks] = useState([]);
-  const [chartData, setChartData] = useState([]);
-  const [marketMovers, setMarketMovers] = useState({ topGainers: [], topLosers: [] });
-  const [marketMoversDate, setMarketMoversDate] = useState('');
-  const [isLoading, setIsLoading] = useState({ stocks: false, chart: false, movers: false });
-  const [error, setError] = useState({ stocks: '', chart: '', movers: '' });
+/* ======================= COMPONENT ======================= */
+export default function Dashboard() {
+  const navigate = useNavigate();
 
-  const getAuthHeaders = () => {
-    const token = localStorage.getItem('adminToken');
-    return { headers: { Authorization: `Bearer ${token}` } };
+  // controls
+  const [country, setCountry] = useState(DEFAULT_COUNTRY);
+  const [symbols, setSymbols] = useState([]);
+  const [symbol, setSymbol] = useState('ALL');
+  const [timeframe, setTimeframe] = useState(DEFAULT_WINDOW);
+
+  // chart
+  const [chartRows, setChartRows] = useState([]);
+  const [loadingChart, setLoadingChart] = useState(false);
+  const [errChart, setErrChart] = useState('');
+
+  // movers
+  const [gainers, setGainers] = useState([]);
+  const [losers, setLosers] = useState([]);
+  const [loadingMovers, setLoadingMovers] = useState(false);
+  const [errMovers, setErrMovers] = useState('');
+
+  const market = COUNTRY_TO_MARKET[country];
+  const isAll = symbol === 'ALL';
+
+  /* ---------- nav helper ---------- */
+  const goToTrend = (sym) => {
+    if (!sym) return;
+    const params = new URLSearchParams({ market, symbol: sym, timeframe });
+    navigate(`/market-trend?${params.toString()}`);
   };
 
-  const safeNumber = (val, fallback = 0) => {
-    const n = Number(val);
-    return Number.isFinite(n) ? n : fallback;
+  /* ---------- Legend (Grid + คลิกได้) ---------- */
+  const renderLegend = ({ payload }) => {
+    const items = (payload || [])
+      .map(e => ({ name: e.value, color: e.color }))
+      .filter((v, i, a) => a.findIndex(x => x.name === v.name) === i)
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return (
+      <LegendWrap>
+        {items.map(({ name, color }) => (
+          <LegendItem
+            key={name}
+            onClick={() => goToTrend(name)}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && goToTrend(name)}
+            role="button"
+            tabIndex={0}
+            title={name}
+            style={{ color }}
+          >
+            <LegendDot color={color} />
+            <LegendLabel>{name}</LegendLabel>
+          </LegendItem>
+        ))}
+      </LegendWrap>
+    );
   };
 
-  const formatPrice = (price, market) => {
-    const numPrice = safeNumber(price, null);
-    if (numPrice === null) return 'N/A';
-    const currencySymbol = market === 'Thailand' ? '฿' : '$';
-    return `${currencySymbol}${numPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  };
-
-  const formatPercentage = (perc, useAbs = false) => {
-    const num = safeNumber(perc, 0);
-    const value = useAbs ? Math.abs(num) : num;
-    return value.toFixed(2);
-  };
-
-  const formatMoversDate = (dateString) => {
-    if (!dateString) return 'Latest';
-    const datePart = String(dateString).split('T')[0];
-    const [y, m, d] = datePart.split('-').map(Number);
-    const date = new Date(Date.UTC(y, m - 1, d));
-    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-  };
-
-  // ---------- โหลดรายชื่อหุ้น + market movers เมื่อเปลี่ยนตลาด ----------
+  /* ---------- loads ---------- */
   useEffect(() => {
-    const fetchDataForMarket = async () => {
-      if (!selectedMarket) return;
-      setIsLoading(prev => ({ ...prev, stocks: true, movers: true }));
-      setError({ stocks: '', chart: '', movers: '' });
-      setMarketMoversDate('');
-
+    (async () => {
       try {
-        const [stocksResponse, moversResponse] = await Promise.all([
-          axios.get(`${API_URL}/stocks?market=${encodeURIComponent(selectedMarket)}`, getAuthHeaders()),
-          axios.get(`${API_URL}/market-movers?market=${encodeURIComponent(selectedMarket)}`, getAuthHeaders())
-        ]);
-
-        const stocks = stocksResponse?.data?.data ?? [];
-        setAvailableStocks(stocks);
-
-        const moversPayload = moversResponse?.data ?? {};
-        const moversData = moversPayload?.data ?? { topGainers: [], topLosers: [] };
-        setMarketMovers({
-          topGainers: Array.isArray(moversData.topGainers) ? moversData.topGainers : [],
-          topLosers: Array.isArray(moversData.topLosers) ? moversData.topLosers : []
-        });
-        setMarketMoversDate(moversPayload?.date || '');
-
-        // ตั้งค่า symbol เริ่มต้นเป็นตัวแรก
-        setSelectedStock(stocks.length > 0 ? stocks[0].StockSymbol : '');
-      } catch (err) {
-        console.error(`Error fetching data for ${selectedMarket}:`, err);
-        setError(prev => ({ ...prev, stocks: 'Failed to load stock list.', movers: 'Failed to load market movers.' }));
-        setAvailableStocks([]); setMarketMovers({ topGainers: [], topLosers: [] }); setSelectedStock('');
-      } finally {
-        setIsLoading(prev => ({ ...prev, stocks: false, movers: false }));
+        const { data } = await axios.get(
+          `${API_BASE}/market-trend/symbols?market=${encodeURIComponent(market)}`,
+          getAuthHeaders()
+        );
+        const list = (data?.data || []).map(r => ({ symbol: r.StockSymbol, name: r.CompanyName || r.StockSymbol }));
+        setSymbols(list);
+        setSymbol(list.length > 1 ? 'ALL' : (list[0]?.symbol || ''));
+      } catch {
+        setSymbols([]); setSymbol('ALL');
       }
-    };
+    })();
+  }, [country, market]);
 
-    fetchDataForMarket();
-  }, [selectedMarket]);
-
-  // ---------- โหลดกราฟเมื่อเปลี่ยน symbol/timeframe ----------
   useEffect(() => {
-    const fetchChartData = async () => {
-      if (!selectedStock) return;
-      setIsLoading(prev => ({ ...prev, chart: true }));
-      setError(prev => ({ ...prev, chart: '' }));
-      setChartData([]);
-
+    if (!symbol) { setChartRows([]); return; }
+    const controller = new AbortController();
+    (async () => {
       try {
-        const endpoint = `${API_URL}/chart-data/${encodeURIComponent(selectedStock)}?timeframe=${encodeURIComponent(selectedTimeframe)}`;
-        const response = await axios.get(endpoint, getAuthHeaders());
-
-        const rows = response?.data?.data ?? [];
-
-        // ✅ สร้าง date(timestamp) + dateLabel(string) เพื่อให้แกน X เว้น “เท่ากันทุกจุด”
-        const transformedData = rows.map(item => {
-          const ts = new Date(item.date).getTime();
-          const label = new Date(ts).toISOString().slice(0, 10); // YYYY-MM-DD
-          return { ...item, date: ts, dateLabel: label };
-        });
-
-        setChartData(transformedData);
-      } catch (err) {
-        console.error('Error fetching chart data:', err);
-        setError(prev => ({ ...prev, chart: 'Failed to load chart data.' }));
+        setLoadingChart(true); setErrChart('');
+        const fetchOne = async (sym) => {
+          const url = `${API_BASE}/chart-data/${encodeURIComponent(sym)}?timeframe=${encodeURIComponent(timeframe)}`;
+          const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
+          return (data?.data || []).map(r => ({ date: r.date, ClosePrice: Number(r.ClosePrice) }));
+        };
+        if (isAll) {
+          const pick = symbols.slice(0, MAX_SERIES).map(s => s.symbol);
+          const settled = await Promise.allSettled(pick.map(sym => fetchOne(sym)));
+          const seriesMap = {};
+          settled.forEach((r, i) => { if (r.status === 'fulfilled' && r.value.length) seriesMap[pick[i]] = r.value; });
+          setChartRows(mergeByDate(seriesMap));
+        } else {
+          const arr = await fetchOne(symbol);
+          setChartRows(arr.map(x => ({ date: new Date(x.date).toISOString().slice(0,10), [symbol]: x.ClosePrice })));
+        }
+      } catch (e) {
+        if (e.name !== 'CanceledError') setErrChart('โหลดข้อมูลกราฟไม่สำเร็จ');
+        setChartRows([]);
       } finally {
-        setIsLoading(prev => ({ ...prev, chart: false }));
+        setLoadingChart(false);
       }
-    };
+    })();
+    return () => controller.abort();
+  }, [symbol, timeframe, symbols]);
 
-    fetchChartData();
-  }, [selectedStock, selectedTimeframe]);
+  useEffect(() => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        setLoadingMovers(true); setErrMovers('');
+        const url = `${API_BASE}/market-movers/range?market=${encodeURIComponent(market)}&timeframe=${encodeURIComponent(timeframe)}&limitSymbols=5000`;
+        const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
+        const rows = data?.data || [];
+        const g = rows.filter(r => (r.changePct ?? 0) > 0).sort((a,b)=> b.changePct - a.changePct);
+        const l = rows.filter(r => (r.changePct ?? 0) < 0).sort((a,b)=> a.changePct - b.changePct);
+        setGainers(g); setLosers(l);
+      } catch (e) {
+        if (e.name !== 'CanceledError') setErrMovers('โหลด gainers/losers ไม่สำเร็จ');
+        setGainers([]); setLosers([]);
+      } finally {
+        setLoadingMovers(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [market, timeframe]);
+
+  const lines = useMemo(() => {
+    if (!chartRows.length) return [];
+    return Object.keys(chartRows[0]).filter(k => k !== 'date').slice(0, MAX_SERIES);
+  }, [chartRows]);
 
   return (
-    <DashboardGrid>
-      <HeaderContainer>
-        <Header>Dashboard Overview</Header>
-        <Selector value={selectedMarket} onChange={(e) => setSelectedMarket(e.target.value)}>
-          <option value="Thailand">Thailand (TH)</option>
-          <option value="America">United States (USA)</option>
-        </Selector>
-        <Selector value={selectedStock} onChange={(e) => setSelectedStock(e.target.value)}>
-          {isLoading.stocks ? <option disabled>Loading...</option> :
-            availableStocks.map(s => <option key={s.StockSymbol} value={s.StockSymbol}>{s.StockSymbol}</option>)}
-        </Selector>
-      </HeaderContainer>
+    <Page>
+      <Title>Dashboard Overview</Title>
 
-      <ChartCard>
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
-          <ChartTitle>{selectedStock ? `Price Chart for ${selectedStock}` : 'Select a stock to view chart'}</ChartTitle>
-          <TimeframeSelector>
-            {['5D','1M','3M','6M','1Y','ALL'].map(tf => (
-              <TimeframeButton key={tf} active={selectedTimeframe === tf} onClick={() => setSelectedTimeframe(tf)}>
-                {tf}
-              </TimeframeButton>
+      <Card>
+        <HeaderRow>
+          <Left>
+            <SubTitle>Price — {market}</SubTitle>
+            <Select value={country} onChange={e => setCountry(e.target.value)}>
+              <option value="TH">Thailand (TH)</option>
+              <option value="USA">United States (USA)</option>
+            </Select>
+            <Select value={symbol} onChange={e => setSymbol(e.target.value)}>
+              {symbols.length > 1 && <option value="ALL">ALL</option>}
+              {symbols.map(s => <option key={s.symbol} value={s.symbol}>{s.symbol}</option>)}
+            </Select>
+          </Left>
+          <Segments>
+            {WINDOWS.map(tf => (
+              <button key={tf} className={tf===timeframe ? 'active' : ''} onClick={()=>setTimeframe(tf)}>{tf}</button>
             ))}
-          </TimeframeSelector>
+          </Segments>
+        </HeaderRow>
+
+        {errChart && <div style={{color:'#ef4444', marginTop:6}}>{errChart}</div>}
+        {loadingChart && <div style={{color:'#a0a0a0', marginTop:6}}>Loading chart...</div>}
+
+        <div style={{ height: 440, marginTop: 8 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={chartRows} margin={{ top:8, right:16, left:0, bottom:24 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+              <XAxis dataKey="date" tick={{ fill:'#c9c9c9' }} />
+              <YAxis tick={{ fill:'#c9c9c9' }} />
+              <Tooltip
+                formatter={(value, name)=> [fmt(value), name]}
+                labelFormatter={(l)=> `Date: ${l}`}
+                contentStyle={{ background:'#2a2a2a', border:'1px solid #444', color:'#eee' }}
+              />
+              <Legend content={renderLegend} wrapperStyle={{ paddingTop: 6 }} />
+
+              {/* เส้นจริง + activeDot คลิกได้ */}
+              {lines.map((k, idx)=> (
+                <Line
+                  key={`vis-${k}`}
+                  type="monotone"
+                  dataKey={k}
+                  name={k}
+                  stroke={COLORS[idx % COLORS.length]}
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                  activeDot={{ r: 6, style:{ cursor:'pointer' }, onClick: () => goToTrend(k) }}
+                />
+              ))}
+
+              {/* เส้นโปร่งใสหนา (hitline) เพื่อให้คลิกง่ายทั้งแนวเส้น */}
+              {lines.map((k)=> (
+                <Line
+                  key={`hit-${k}`}
+                  type="monotone"
+                  dataKey={k}
+                  stroke="rgba(0,0,0,0)"
+                  strokeWidth={16}
+                  dot={false}
+                  isAnimationActive={false}
+                  onClick={() => goToTrend(k)}
+                  style={{ cursor: 'pointer' }}
+                />
+              ))}
+
+              <Brush dataKey="date" height={26} travellerWidth={12} stroke="#666"
+                     startIndex={0} endIndex={Math.min(Math.max(chartRows.length-1,0), 40)} />
+            </LineChart>
+          </ResponsiveContainer>
         </div>
+      </Card>
 
-        <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center' }}>
-          {isLoading.chart ? (
-            <p>Loading Chart...</p>
-          ) : error.chart ? (
-            <p style={{ color:'red' }}>{error.chart}</p>
-          ) : chartData.length > 0 ? (
-            <OverviewChart data={chartData} dataKey={selectedStock} market={selectedMarket} timeframe={selectedTimeframe} />
-          ) : (
-            <p>{selectedStock ? 'No chart data available.' : ''}</p>
-          )}
-        </div>
-      </ChartCard>
+      <TwoCol>
+        <ListCard>
+          <SubTitle>Gainers — {market} ({timeframe})</SubTitle>
+          {errMovers && <div style={{color:'#ef4444', marginTop:6}}>{errMovers}</div>}
+          {loadingMovers && <div style={{color:'#a0a0a0', marginTop:6}}>Loading...</div>}
+          {!loadingMovers && !gainers.length && <div style={{color:'#aaa', marginTop:8}}>No data</div>}
+          {gainers.map(r => (
+            <Row key={`G-${r.StockSymbol}`} onClick={() => goToTrend(r.StockSymbol)} title="Open in Market Trend">
+              <Sym>{r.StockSymbol}</Sym>
+              <Pct style={{ color:'#22c55e' }}>{fmt(r.changePct,2)}%</Pct>
+            </Row>
+          ))}
+        </ListCard>
 
-      <ListCard>
-        <ListTitle>Top Gainers</ListTitle>
-        {isLoading.movers ? <p>Loading...</p> : error.movers ? <p style={{ color:'red' }}>{error.movers}</p> :
-          (marketMovers.topGainers.length ? marketMovers.topGainers.map(stock => {
-            const chg = safeNumber(stock.Changepercen, 0);
-            return (
-              <StockItem key={stock.StockSymbol}>
-                <StockInfoContainer><StockSymbol>{stock.StockSymbol}</StockSymbol></StockInfoContainer>
-                <StockPriceAndChange>
-                  <StockPrice>{formatPrice(stock.ClosePrice, selectedMarket)}</StockPrice>
-                  <StockChange positive={chg >= 0}>
-                    {chg > 0 && <FaArrowUp />} {chg < 0 && <FaArrowDown />} {Math.abs(chg).toFixed(2)}%
-                  </StockChange>
-                </StockPriceAndChange>
-              </StockItem>
-            );
-          }) : <p style={{ textAlign:'center', color:'#a0a0a0', marginTop:20 }}>No top gainers found.</p>)
-        }
-      </ListCard>
-
-      <ListCard>
-        <ListTitle>Top Losers</ListTitle>
-        {isLoading.movers ? <p>Loading...</p> : error.movers ? <p style={{ color:'red' }}>{error.movers}</p> :
-          (marketMovers.topLosers.length ? marketMovers.topLosers.map(stock => {
-            const chg = safeNumber(stock.Changepercen, 0);
-            return (
-              <StockItem key={stock.StockSymbol}>
-                <StockInfoContainer><StockSymbol>{stock.StockSymbol}</StockSymbol></StockInfoContainer>
-                <StockPriceAndChange>
-                  <StockPrice>{formatPrice(stock.ClosePrice, selectedMarket)}</StockPrice>
-                  <StockChange positive={chg >= 0}>
-                    {chg > 0 && <FaArrowUp />} {chg < 0 && <FaArrowDown />} {Math.abs(chg).toFixed(2)}%
-                  </StockChange>
-                </StockPriceAndChange>
-              </StockItem>
-            );
-          }) : <p style={{ textAlign:'center', color:'#a0a0a0', marginTop:20 }}>No top losers found.</p>)
-        }
-      </ListCard>
-    </DashboardGrid>
+        <ListCard>
+          <SubTitle>Losers — {market} ({timeframe})</SubTitle>
+          {errMovers && <div style={{color:'#ef4444', marginTop:6}}>{errMovers}</div>}
+          {loadingMovers && <div style={{color:'#a0a0a0', marginTop:6}}>Loading...</div>}
+          {!loadingMovers && !losers.length && <div style={{color:'#aaa', marginTop:8}}>No data</div>}
+          {losers.map(r => (
+            <Row key={`L-${r.StockSymbol}`} onClick={() => goToTrend(r.StockSymbol)} title="Open in Market Trend">
+              <Sym>{r.StockSymbol}</Sym>
+              <Pct style={{ color:'#ef4444' }}>{fmt(r.changePct,2)}%</Pct>
+            </Row>
+          ))}
+        </ListCard>
+      </TwoCol>
+    </Page>
   );
 }
-
-export default Dashboard;

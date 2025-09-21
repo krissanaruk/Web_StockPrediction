@@ -7,7 +7,8 @@ const DashboardContainer = styled.div`
   height: 100vh;
   background: #121212;
   color: #e0e0e0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
   overflow: hidden;
 `;
 
@@ -34,16 +35,8 @@ const SidebarNavLink = styled(NavLink)`
   padding: 10px 15px;
   border-radius: 8px;
   transition: background-color 0.3s, color 0.3s;
-
-  &:hover {
-    background-color: #333;
-    color: #ff8c00;
-  }
-
-  &.active {
-    background-color: #ff8c00;
-    color: #1e1e1e;
-  }
+  &:hover { background-color: #333; color: #ff8c00; }
+  &.active { background-color: #ff8c00; color: #1e1e1e; }
 `;
 
 const SidebarButton = styled.button`
@@ -59,12 +52,8 @@ const SidebarButton = styled.button`
   font-family: inherit;
   text-align: left;
   width: 100%;
-  margin-top: auto; /* ดันปุ่มไปไว้ด้านล่างสุด */
-
-  &:hover {
-    background-color: #333;
-    color: #ff8c00;
-  }
+  margin-top: auto;
+  &:hover { background-color: #333; color: #ff8c00; }
 `;
 
 const PageContentContainer = styled.div`
@@ -77,17 +66,14 @@ const PageContentContainer = styled.div`
 const AdminLayout = () => {
   const navigate = useNavigate();
 
-  // ตรวจสอบ token เมื่อ component โหลด
+  // ถ้าไม่มี token → เด้งไปหน้า Login
   useEffect(() => {
     const token = localStorage.getItem('adminToken');
-    if (!token) {
-      console.log("No admin token found, redirecting to login.");
-      navigate('/', { replace: true }); // ใช้ replace: true เพื่อไม่ให้ผู้ใช้กด back กลับมาได้
-    }
+    if (!token) navigate('/', { replace: true });
   }, [navigate]);
 
   const handleLogout = () => {
-    localStorage.removeItem('adminToken');  
+    localStorage.removeItem('adminToken');
     navigate('/');
   };
 
@@ -97,15 +83,21 @@ const AdminLayout = () => {
         <LogoLink to="/dashboard">
           <h2 style={{ color: '#ff8c00', margin: 0 }}>📊 Admin Dashboard</h2>
         </LogoLink>
+
         <SidebarNavLink to="/dashboard" end>Overview</SidebarNavLink>
         <SidebarNavLink to="/manageuser">User Management</SidebarNavLink>
         <SidebarNavLink to="/ai-trade-monitoring">AI Trade Monitoring</SidebarNavLink>
         <SidebarNavLink to="/model-performance-comparison">Model Performance Comparison</SidebarNavLink>
-        <SidebarNavLink to="/market-trend-analysis">Market Trend Analysis</SidebarNavLink>
+
+        {/* ✅ ใช้ path เดียวกับ navigate จากกราฟ */}
+        <SidebarNavLink to="/market-trend">Market Trend Analysis</SidebarNavLink>
+
         <SidebarButton onClick={handleLogout}>ออกจากระบบ</SidebarButton>
       </Sidebar>
+
       <PageContentContainer>
-        <Outlet /> {/* คือตำแหน่งที่เนื้อหาของแต่ละหน้าจะถูกแสดงผล */}
+        {/* เนื้อหาของหน้าลูก */}
+        <Outlet />
       </PageContentContainer>
     </DashboardContainer>
   );

@@ -1,629 +1,518 @@
-// MarketTrend.js
-import React, { useState, useEffect, useMemo } from 'react';
+// src/pages/MarketTrendAnalysis.js
+import React, { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
+import { useLocation } from 'react-router-dom';
 
 /* =========================================================================
    1) CONFIG
    ========================================================================= */
 const API_BASE = 'http://localhost:3000/api/market-trend';
+
 const COUNTRY_TO_MARKET = { TH: 'Thailand', USA: 'America' };
+const MARKET_TO_COUNTRY = { Thailand: 'TH', America: 'USA' };
 const DEFAULT_SYMBOL_BY_COUNTRY = { TH: 'ADVANC', USA: 'AAPL' };
 
-// ใช้ข้อมูลพอสำหรับ MA200 + mini-backtest
-const SERIES_LIMIT = 320;
-
-const getAuthHeaders = () => {
-  const token = localStorage.getItem('adminToken');
-  return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
+/** Timeframe -> จำนวนแท่งที่จะใช้ในหน้าต่างคำนวณ/แสดงผล */
+const TF_LIMIT = {
+  '1D': 2,
+  '5D': 7,
+  '1M': 22,
+  '3M': 66,
+  '6M': 132,
+  '1Y': 252,
+  'ALL': 320,
 };
+const DEFAULT_TF = '1M';
 
-// แสดงสกุลเงินตามตลาด (ใช้ใน UI เท่านั้น)
+/** โหลดขั้นต่ำให้ MA200/MACD/BB/RSI และ warmup พร้อมแน่ ๆ */
+const LOOKBACKS = [200, 26 + 9, 20, 14]; // MA200, MACD(12,26,9), BB20, RSI14
+const WARMUP = 30;
+const LOOKAHEAD = 5;
+const INDICATOR_MIN = Math.max(...LOOKBACKS) + WARMUP + LOOKAHEAD; // ~260
+
+/** UI เงินตามตลาด */
 const CURRENCY_BY_MARKET = { Thailand: 'THB', America: 'USD' };
-const formatMoney = (value, market) => {
+const fmtMoney = (value, market) => {
+  if (value == null || !Number.isFinite(Number(value))) return 'N/A';
   const currency = CURRENCY_BY_MARKET[market] || 'USD';
   try {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(value);
   } catch {
-    // เผื่อ env ไม่มี Intl currency
     return `${currency === 'THB' ? '฿' : '$'}${Number(value).toFixed(2)}`;
   }
 };
+const auth = () => {
+  const token = localStorage.getItem('adminToken');
+  return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
+};
 
 /* =========================================================================
-   2) SMALL HELPERS (เลข/สถิติ)
+   2) HELPERS
    ========================================================================= */
 const toNum = (v) => (v == null ? null : Number(v));
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const sign = (x) => (x > 0 ? 1 : x < 0 ? -1 : 0);
-const last = (arr) => (arr && arr.length ? arr[arr.length - 1] : null);
 
-const percentile = (arr, p) => {
-  const valid = arr.filter((x) => x != null && Number.isFinite(x));
-  if (!valid.length) return null;
-  const s = [...valid].sort((a, b) => a - b);
-  const idx = Math.floor((p / 100) * (s.length - 1));
-  return s[idx];
+const stdev = (arr) => {
+  const v = arr.filter((x) => Number.isFinite(x));
+  if (!v.length) return 0;
+  const m = v.reduce((a, b) => a + b, 0) / v.length;
+  return Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / v.length);
 };
-
-const stddev = (win) => {
-  if (!win || !win.length) return null;
-  const mean = win.reduce((a, b) => a + b, 0) / win.length;
-  const v = win.reduce((acc, x) => acc + (x - mean) ** 2, 0) / win.length;
-  return Math.sqrt(v);
+const maxDrawdown = (prices) => {
+  let peak = -Infinity, mdd = 0;
+  for (const p of prices) {
+    if (!Number.isFinite(p)) continue;
+    peak = Math.max(peak, p);
+    mdd = Math.min(mdd, (p - peak) / peak);
+  }
+  return mdd; // negative number
 };
 
 /* =========================================================================
-   3) INDICATORS (SMA, EMA, RSI, MACD, BB, ATR)
+   3) INDICATORS (null-safe)
    ========================================================================= */
-// SMA
 const sma = (arr, period) => {
-  if (!arr || !arr.length) return [];
+  if (!arr?.length) return [];
   const out = new Array(arr.length).fill(null);
-  let sum = 0;
+  let sum = 0, q = [];
   for (let i = 0; i < arr.length; i++) {
-    sum += arr[i];
-    if (i >= period) sum -= arr[i - period];
-    if (i >= period - 1) out[i] = sum / period;
+    const v = Number.isFinite(arr[i]) ? arr[i] : null;
+    if (v == null) { q = []; sum = 0; continue; }
+    q.push(v); sum += v;
+    if (q.length > period) sum -= q.shift();
+    if (q.length === period) out[i] = sum / period;
   }
   return out;
 };
-
-// EMA
 const ema = (arr, period) => {
-  if (!arr || !arr.length) return [];
+  if (!arr?.length) return [];
   const out = new Array(arr.length).fill(null);
   const k = 2 / (period + 1);
-  let prev = arr[0];
-  out[0] = prev;
-  for (let i = 1; i < arr.length; i++) {
-    prev = arr[i] * k + prev * (1 - k);
+  let prev = null;
+  for (let i = 0; i < arr.length; i++) {
+    const v = Number.isFinite(arr[i]) ? arr[i] : null;
+    if (v == null) { out[i] = prev; continue; }
+    if (prev == null) prev = v;
+    else prev = v * k + prev * (1 - k);
     out[i] = prev;
   }
   return out;
 };
-
-// RSI (Wilder)
 const rsi = (arr, period = 14) => {
-  if (!arr || arr.length < period + 1) return new Array(arr?.length || 0).fill(null);
+  if (!arr?.length || arr.length < period + 1) return new Array(arr?.length || 0).fill(null);
   const out = new Array(arr.length).fill(null);
-  const gains = [], losses = [];
+  const gain = [], loss = [];
   for (let i = 1; i < arr.length; i++) {
-    const d = arr[i] - arr[i - 1];
-    gains.push(Math.max(d, 0));
-    losses.push(Math.max(-d, 0));
+    const a = Number.isFinite(arr[i]) ? arr[i] : null;
+    const b = Number.isFinite(arr[i - 1]) ? arr[i - 1] : null;
+    if (a == null || b == null) { gain.push(0); loss.push(0); continue; }
+    const d = a - b;
+    gain.push(Math.max(d, 0)); loss.push(Math.max(-d, 0));
   }
-  let avgGain = gains.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  let avgLoss = losses.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  out[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  let G = gain.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  let L = loss.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  out[period] = L === 0 ? 100 : 100 - 100 / (1 + G / L);
   for (let i = period + 1; i < arr.length; i++) {
-    const g = gains[i - 1], l = losses[i - 1];
-    avgGain = (avgGain * (period - 1) + g) / period;
-    avgLoss = (avgLoss * (period - 1) + l) / period;
-    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+    G = (G * (period - 1) + (gain[i - 1] ?? 0)) / period;
+    L = (L * (period - 1) + (loss[i - 1] ?? 0)) / period;
+    out[i] = L === 0 ? 100 : 100 - 100 / (1 + G / L);
   }
   return out;
 };
-
-// MACD (12,26,9)
-const macdCalc = (arr, fast = 12, slow = 26, signal = 9) => {
-  if (!arr || !arr.length) return { macdLine: [], signalLine: [], hist: [] };
-  const eFast = ema(arr, fast);
-  const eSlow = ema(arr, slow);
-  const macdLine = arr.map((_, i) =>
-    eFast[i] != null && eSlow[i] != null ? eFast[i] - eSlow[i] : null
-  );
-  const firstIdx = macdLine.findIndex((v) => v != null);
+const macd = (arr, fast = 12, slow = 26, signalP = 9) => {
+  if (!arr?.length) return { macdLine: [], signalLine: [], hist: [] };
+  const ef = ema(arr, fast), es = ema(arr, slow);
+  const macdLine = arr.map((_, i) => (ef[i] != null && es[i] != null) ? ef[i] - es[i] : null);
+  const first = macdLine.findIndex((v) => v != null);
   const valid = macdLine.filter((v) => v != null);
-  const sigValid = ema(valid, signal);
+  const sigValid = ema(valid, signalP);
   const signalLine = new Array(arr.length).fill(null);
-  for (let i = 0; i < sigValid.length; i++) signalLine[firstIdx + i] = sigValid[i];
-  const hist = macdLine.map((v, i) => (v != null && signalLine[i] != null ? v - signalLine[i] : null));
+  for (let i = 0; i < sigValid.length; i++) signalLine[first + i] = sigValid[i];
+  const hist = macdLine.map((v, i) => (v != null && signalLine[i] != null) ? v - signalLine[i] : null);
   return { macdLine, signalLine, hist };
 };
-
-// Bollinger Bands (20, 2)
-const bollinger = (arr, period = 20, k = 2) => {
-  if (!arr || arr.length < period) {
+const bb = (arr, period = 20, k = 2) => {
+  if (!arr?.length || arr.length < period) {
     const empty = new Array(arr?.length || 0).fill(null);
-    return { upper: empty, middle: empty, lower: empty, width: empty };
+    return { upper: empty, middle: empty, lower: empty };
   }
-  const middle = sma(arr, period);
-  const upper = new Array(arr.length).fill(null);
-  const lower = new Array(arr.length).fill(null);
-  const width = new Array(arr.length).fill(null);
+  const mid = sma(arr, period);
+  const up = new Array(arr.length).fill(null);
+  const lo = new Array(arr.length).fill(null);
   for (let i = 0; i < arr.length; i++) {
-    if (i >= period - 1) {
-      const win = arr.slice(i - period + 1, i + 1);
-      const m = middle[i];
-      const sd = stddev(win);
-      const up = m + k * sd;
-      const lo = m - k * sd;
-      upper[i] = up; lower[i] = lo;
-      width[i] = (up - lo) / m;
-    }
+    if (i < period - 1) continue;
+    const win = arr.slice(i - period + 1, i + 1).filter(Number.isFinite);
+    const m = mid[i]; if (!Number.isFinite(m)) continue;
+    const sd = stdev(win);
+    up[i] = m + k * sd; lo[i] = m - k * sd;
   }
-  return { upper, middle, lower, width };
-};
-
-// ATR(14)
-const atr = (highs, lows, closes, period = 14) => {
-  if (!highs || !lows || !closes || highs.length !== lows.length || lows.length !== closes.length)
-    return new Array(closes?.length || 0).fill(null);
-  if (closes.length < period + 1) return new Array(closes.length).fill(null);
-
-  const TR = new Array(closes.length).fill(null);
-  for (let i = 1; i < closes.length; i++) {
-    const tr = Math.max(
-      highs[i] - lows[i],
-      Math.abs(highs[i] - closes[i - 1]),
-      Math.abs(lows[i] - closes[i - 1])
-    );
-    TR[i] = tr;
-  }
-  const out = new Array(closes.length).fill(null);
-  let first = 0;
-  for (let i = 1; i <= period; i++) first += TR[i] || 0;
-  let val = first / period;
-  out[period] = val;
-  for (let i = period + 1; i < closes.length; i++) {
-    val = (val * (period - 1) + TR[i]) / period;
-    out[i] = val;
-  }
-  return out;
+  return { upper: up, middle: mid, lower: lo };
 };
 
 /* =========================================================================
-   4) CORE CALC: สร้างอินดิเคเตอร์ทั้งหมด + คิดคะแนน + backtest
+   4) CORE CALC (คะแนน+สัญญาณ)
    ========================================================================= */
-/** เตรียม arrays สำหรับอินดิเคเตอร์ทั้งหมดจาก series */
-function buildIndicatorArrays(series) {
-  const closes = series.map((d) => toNum(d.ClosePrice));
-  const highs  = series.map((d) => toNum(d.HighPrice ?? d.High));
-  const lows   = series.map((d) => toNum(d.LowPrice ?? d.Low));
-
-  const ma50Arr   = sma(closes, 50);
-  const ma200Arr  = sma(closes, 200);
-  const rsiArr    = rsi(closes, 14);
-  const macdObj   = macdCalc(closes, 12, 26, 9);
-  const bb        = bollinger(closes, 20, 2);
-  const atrArr    = atr(highs, lows, closes, 14);
-
-  return { closes, highs, lows, ma50Arr, ma200Arr, rsiArr, macdObj, bb, atrArr };
+function buildCtx(series) {
+  const c = series.map((d) => toNum(d.ClosePrice));
+  const ma50 = sma(c, 50), ma200 = sma(c, 200);
+  const ema10a = ema(c, 10), ema20a = ema(c, 20), ema12a = ema(c, 12), ema26a = ema(c, 26);
+  const r = rsi(c, 14);
+  const m = macd(c, 12, 26, 9);
+  const b = bb(c, 20, 2);
+  return { closes: c, ma50, ma200, ema10a, ema20a, ema12a, ema26a, rsi: r, macd: m, bb: b };
 }
+function scoreAt(i, ctx) {
+  const { closes, ma50, ma200, rsi, macd: { macdLine, signalLine }, bb } = ctx;
+  const price = closes[i]; if (!Number.isFinite(price)) return { score: 0, reasons: [] };
+  let trend = 0, mom = 0, mr = 0, vol = 0; const base = Math.max(price, 1e-6);
+  const reasons = [];
 
-/** คิดคะแนนรวม (Confluence) ที่ index i */
-function scoreAtIndex(i, ctx) {
-  const {
-    closes, ma50Arr, ma200Arr, rsiArr, macdObj: { macdLine, signalLine }, bb,
-  } = ctx;
-  const price = closes[i];
-  let reasons = [];
-  let trend = 0, mom = 0, mr = 0, vol = 0;
-
-  // Trend: gap MA50 vs MA200 + slope MA50
-  if (ma50Arr[i] != null && ma200Arr[i] != null) {
-    const gap = ma50Arr[i] - ma200Arr[i];
-    trend += clamp(gap / (price * 0.02), -1, 1);
-    if (i >= 5 && ma50Arr[i - 5] != null) {
-      trend += 0.3 * clamp((ma50Arr[i] - ma50Arr[i - 5]) / (price * 0.01), -1, 1);
-    }
-    if (gap > 0) reasons.push('MA50 > MA200 (bias ขาขึ้น)');
-    if (gap < 0) reasons.push('MA50 < MA200 (bias ขาลง)');
+  // Trend
+  if (ma50[i] != null && ma200[i] != null) {
+    const gap = ma50[i] - ma200[i];
+    trend += clamp(gap / (base * 0.02), -1, 1);
+    if (i >= 5 && ma50[i - 5] != null) trend += 0.3 * clamp((ma50[i] - ma50[i - 5]) / (base * 0.01), -1, 1);
+    reasons.push(gap > 0 ? 'MA50 > MA200' : 'MA50 < MA200');
   }
-
-  // Momentum: MACD vs Signal + RSI centerline
+  // Momentum
   if (macdLine[i] != null && signalLine[i] != null) {
-    const mdiff = macdLine[i] - signalLine[i];
-    mom += 0.7 * clamp(mdiff / (price * 0.005), -1, 1);
-    if (mdiff > 0) reasons.push('MACD > Signal (โมเมนตัมบวก)');
-    if (mdiff < 0) reasons.push('MACD < Signal (โมเมนตัมลบ)');
+    const md = macdLine[i] - signalLine[i];
+    mom += 0.7 * clamp(md / (base * 0.005), -1, 1);
+    reasons.push(md > 0 ? 'MACD > Signal' : 'MACD < Signal');
   }
-  if (rsiArr[i] != null) {
-    mom += 0.3 * clamp((rsiArr[i] - 50) / 50, -1, 1);
-    if (rsiArr[i] > 55) reasons.push('RSI > 50 (แรงซื้อเด่น)');
-    if (rsiArr[i] < 45) reasons.push('RSI < 50 (แรงขายเด่น)');
+  if (rsi[i] != null) {
+    mom += 0.3 * clamp((rsi[i] - 50) / 50, -1, 1);
+    if (rsi[i] > 55) reasons.push('RSI>50');
+    if (rsi[i] < 45) reasons.push('RSI<50');
   }
-
-  // Mean Reversion: BB touch + RSI extreme
-  if (bb.upper[i] != null && bb.lower[i] != null && price != null) {
-    if (price <= bb.lower[i]) { mr += 0.8; reasons.push('ราคาชน/ต่ำกว่า Lower Band'); }
-    if (price >= bb.upper[i]) { mr -= 0.8; reasons.push('ราคาชน/เหนือกว่า Upper Band'); }
+  // Mean-reversion
+  if (bb.upper[i] != null && bb.lower[i] != null) {
+    if (price <= bb.lower[i]) { mr += 0.8; reasons.push('Touch Lower BB'); }
+    if (price >= bb.upper[i]) { mr -= 0.8; reasons.push('Touch Upper BB'); }
   }
-  if (rsiArr[i] != null) {
-    if (rsiArr[i] <= 30) { mr += 0.6; reasons.push('RSI Oversold'); }
-    if (rsiArr[i] >= 70) { mr -= 0.6; reasons.push('RSI Overbought'); }
-  }
-
-  // Volatility/Squeeze: BB width ต่ำ + ใช้ทิศ MACD
-  if (i >= 60 && bb.width[i] != null) {
-    const wnd = bb.width.slice(i - 59, i + 1).filter(v => v != null);
-    const p20 = percentile(wnd, 20);
-    if (p20 != null && bb.width[i] <= p20) {
-      const md = (ctx.macdObj.macdLine[i] ?? 0) - (ctx.macdObj.signalLine[i] ?? 0);
-      vol += 0.3 * sign(md);
-      reasons.push('Volatility squeeze (BB แคบ)');
-    }
+  // Volatility hint
+  if (macdLine[i] != null && signalLine[i] != null && bb.middle[i] != null) {
+    const md = macdLine[i] - signalLine[i];
+    vol += 0.1 * sign(md);
   }
 
-  const W_TREND = 0.4, W_MOM = 0.3, W_MR = 0.2, W_VOL = 0.1;
-  const score =
-    W_TREND * clamp(trend, -1, 1) +
-    W_MOM   * clamp(mom,   -1, 1) +
-    W_MR    * clamp(mr,    -1, 1) +
-    W_VOL   * clamp(vol,   -1, 1);
-
+  const W_T = 0.4, W_M = 0.3, W_R = 0.2, W_V = 0.1;
+  const score = W_T * clamp(trend, -1, 1) + W_M * clamp(mom, -1, 1) + W_R * clamp(mr, -1, 1) + W_V * clamp(vol, -1, 1);
   return { score, reasons };
 }
-
-/** mini-backtest: นับสัญญาณย้อนหลังแล้วดูอีก lookahead แท่ง */
-function miniBacktest(ctx, lookahead = 5, BUY_TH = 0.35, SELL_TH = -0.35) {
-  const { closes, ma200Arr, macdObj, bb, rsiArr } = ctx;
-  if (!closes || closes.length < 220) return { effectiveness: 0, hits: 0, total: 0, lookahead };
-
-  const start = Math.max(
-    200,            // MA200 พร้อม
-    26 + 9,        // MACD+Signal พร้อม
-    20 + 1,        // Bollinger พร้อม
-    14 + 1         // RSI พร้อม
-  );
-
-  let hits = 0, total = 0;
-  for (let t = start; t < closes.length - lookahead; t++) {
-    // ข้ามจุดที่ข้อมูลยังไม่พร้อม
-    if (ma200Arr[t] == null || macdObj.signalLine[t] == null || bb.middle[t] == null || rsiArr[t] == null) {
-      continue;
-    }
-    const { score } = scoreAtIndex(t, ctx);
-    const sig = score >= BUY_TH ? 'BUY' : score <= SELL_TH ? 'SELL' : 'HOLD';
-    if (sig === 'HOLD') continue;
-
-    total++;
-    const pv = closes[t];
-    const fv = closes[t + lookahead];
-    if (pv == null || fv == null) continue;
-    const ok = sig === 'BUY' ? fv > pv : fv < pv;
-    if (ok) hits++;
-  }
-  const effectiveness = total ? Math.round((hits / total) * 100) : 0;
-  return { effectiveness, hits, total, lookahead };
-}
-
-/** รวบยอด: คำนวณทุกอย่างสำหรับ UI */
 function computeTechnical(series) {
-  if (!series || !series.length) return null;
-
-  const ctx = buildIndicatorArrays(series);
+  if (!series?.length) return null;
+  const ctx = buildCtx(series);
   const i = ctx.closes.length - 1;
   const price = ctx.closes[i];
 
-  // อินดิเคเตอร์ ณ จุดล่าสุด
-  const ma50  = ctx.ma50Arr[i] ?? null;
-  const ma200 = ctx.ma200Arr[i] ?? null;
-  const rsiV  = ctx.rsiArr[i] ?? null;
-  const macdV = ctx.macdObj.macdLine[i] ?? null;
-  const macdS = ctx.macdObj.signalLine[i] ?? null;
-  const bbUp  = ctx.bb.upper[i] ?? null;
-  const bbMd  = ctx.bb.middle[i] ?? null;
-  const bbLo  = ctx.bb.lower[i] ?? null;
-
-  // คะแนนรวม + เหตุผล
-  const { score, reasons } = scoreAtIndex(i, ctx);
-  const BUY_TH = 0.35, SELL_TH = -0.35;
-
-  let latestSignal = 'HOLD';
-  if (score >= BUY_TH) latestSignal = 'BUY';
-  else if (score <= SELL_TH) latestSignal = 'SELL';
-
-  // ความเชื่อมั่น: ตาม |score| และจำนวนอินดิเคเตอร์ที่พร้อม
-  const parts =
-    (ma50 != null && ma200 != null ? 1 : 0) +
-    (macdV != null && macdS != null ? 1 : 0) +
-    (rsiV != null ? 1 : 0) +
-    (bbUp != null && bbLo != null ? 1 : 0);
-  const coverage = parts / 4;
-  const confidence = clamp(Math.abs(score) * (0.6 + 0.4 * coverage), 0, 1);
-
-  // mini-backtest
-  const bt = miniBacktest(ctx, 5, BUY_TH, SELL_TH);
-
-  return {
-    ma: {
-      ma50, ma200,
-      signal:
-        ma50 != null && ma200 != null
-          ? (ma50 > ma200 ? 'Golden Cross (Uptrend Bias)' : 'Death Cross (Downtrend Bias)')
-          : 'Neutral',
-      color:
-        ma50 != null && ma200 != null
-          ? (ma50 > ma200 ? '#28a745' : '#dc3545')
-          : '#6c757d',
-    },
-    rsi: {
-      value: rsiV,
-      signal:
-        rsiV == null ? 'Neutral'
-        : rsiV >= 70 ? 'Overbought'
-        : rsiV <= 30 ? 'Oversold'
-        : rsiV > 50 ? 'Bullish Momentum' : 'Bearish Momentum',
-      color:
-        rsiV == null ? '#6c757d'
-        : rsiV >= 70 ? '#dc3545'
-        : rsiV <= 30 ? '#28a745'
-        : rsiV > 50 ? '#28a745' : '#dc3545',
-    },
-    macd: {
-      value: macdV,
-      signalLine: macdS,
-      text:
-        macdV != null && macdS != null
-          ? (macdV > macdS ? 'Bullish Crossover' : 'Bearish Crossover')
-          : 'Neutral',
-      color:
-        macdV != null && macdS != null
-          ? (macdV > macdS ? '#28a745' : '#dc3545')
-          : '#6c757d',
-    },
-    bb: {
-      upper: bbUp, middle: bbMd, lower: bbLo,
-      text:
-        price != null && bbUp != null && bbLo != null
-          ? (price >= bbUp ? 'Price at/above Upper Band'
-            : price <= bbLo ? 'Price at/below Lower Band'
-            : 'Price near Middle Band')
-          : 'Price near Middle Band',
-      color:
-        price != null && bbUp != null && bbLo != null
-          ? (price >= bbUp ? '#dc3545'
-            : price <= bbLo ? '#28a745'
-            : '#6c757d')
-          : '#6c757d',
-    },
-    strategy: {
-      latestSignal,
-      score,
-      confidence,                    // 0..1
-      signalPrice: price ?? null,
-      reason:
-        latestSignal === 'HOLD'
-          ? 'สภาวะยังไม่ชัดเจน (คะแนนกลาง ๆ)'
-          : reasons.slice(0, 3).join(' • '),
-      effectiveness: bt.effectiveness,
-      hits: bt.hits,
-      total: bt.total,
-      lookahead: bt.lookahead,
-    },
+  const v = {
+    ma50: ctx.ma50[i], ma200: ctx.ma200[i],
+    ema10: ctx.ema10a[i], ema20: ctx.ema20a[i],
+    ema12: ctx.ema12a[i], ema26: ctx.ema26a[i],
+    rsi: ctx.rsi[i],
+    macd: ctx.macd.macdLine[i], macdSig: ctx.macd.signalLine[i],
+    bbUp: ctx.bb.upper[i], bbMd: ctx.bb.middle[i], bbLo: ctx.bb.lower[i],
   };
+
+  const { score, reasons } = scoreAt(i, ctx);
+  const BUY_TH = 0.20, SELL_TH = -0.20;
+  let signal = 'HOLD';
+  if (score >= BUY_TH) signal = 'BUY';
+  else if (score <= SELL_TH) signal = 'SELL';
+
+  const parts =
+    (v.ma50 != null && v.ma200 != null ? 1 : 0) +
+    (v.macd != null && v.macdSig != null ? 1 : 0) +
+    (v.rsi != null ? 1 : 0) +
+    (v.bbUp != null && v.bbLo != null ? 1 : 0);
+  const coverage = parts / 4;
+  const confidence = Math.round(100 * clamp(Math.abs(score) * (0.6 + 0.4 * coverage), 0, 1));
+
+  return { ctx, price, v, score, signal, confidence, reasons };
+}
+function backtestFull(fullSeries) {
+  if (!fullSeries?.length || fullSeries.length < INDICATOR_MIN) {
+    return { effectiveness: 0, hits: 0, total: 0, lookahead: LOOKAHEAD };
+  }
+  const ctx = buildCtx(fullSeries);
+  const n = ctx.closes.length;
+  const BUY_TH = 0.20, SELL_TH = -0.20;
+
+  let total = 0, hits = 0;
+  let prevScore = null, lastSide = 'FLAT';
+
+  for (let t = 200; t < n - LOOKAHEAD; t++) {
+    if ([ctx.ma200[t], ctx.macd.signalLine[t], ctx.rsi[t], ctx.bb.middle[t]].some(x => x == null)) continue;
+
+    const { score } = scoreAt(t, ctx);
+    if (prevScore == null) { prevScore = score; continue; }
+
+    let sig = 'HOLD';
+    if (prevScore < BUY_TH && score >= BUY_TH) sig = 'BUY';
+    else if (prevScore > SELL_TH && score <= SELL_TH) sig = 'SELL';
+    prevScore = score;
+
+    if (sig === 'HOLD' || sig === lastSide) continue;
+    lastSide = sig;
+
+    const pv = ctx.closes[t], fv = ctx.closes[t + LOOKAHEAD];
+    if (!Number.isFinite(pv) || !Number.isFinite(fv)) continue;
+    const ok = sig === 'BUY' ? fv > pv : fv < pv;
+    total++; if (ok) hits++;
+  }
+  const eff = total ? Math.round((hits / total) * 100) : 0;
+  return { effectiveness: eff, hits, total, lookahead: LOOKAHEAD };
 }
 
 /* =========================================================================
-   5) UI (คงดีไซน์เดิม)
+   5) UI STYLES
    ========================================================================= */
-const MainContent = styled.div`
-  flex: 1; display: flex; flex-direction: column; align-items: center;
-  overflow-y: auto; padding: 20px; color: #e0e0e0;
+const Main = styled.div`flex:1; display:flex; flex-direction:column; align-items:center; padding:20px; color:#e0e0e0;`;
+const Header = styled.header`width:100%; background:#ff8c00; color:#fff; padding:15px; border-radius:10px; font-size:28px; font-weight:700; text-align:center; margin-bottom:20px;`;
+const Box = styled.div`background:#1e1e1e; border:1px solid #333; border-radius:12px; box-shadow:0 5px 15px rgba(0,0,0,.3); padding:25px; width:100%; max-width:1400px;`;
+const H3 = styled.h3`color:#ff8c00; border-bottom:2px solid #ff8c00; padding-bottom:10px; margin:0 0 20px 0; font-size:22px;`;
+const Row = styled.div`display:flex; gap:15px; flex-wrap:wrap; margin-bottom:16px; align-items:center;`;
+const Select = styled.select`background:#333; color:#fff; border:1px solid rgba(255,255,255,.3); border-radius:8px; padding:10px; font-weight:700;`;
+const Grid = styled.div`display:grid; grid-template-columns:repeat(auto-fit, minmax(280px,1fr)); gap:20px;`;
+const Card = styled.div`background:#2a2a2a; border-left:5px solid ${p=>p.color||'#ff8c00'}; border-radius:10px; padding:18px;`;
+const Title = styled.h4`margin:0 0 8px 0; color:#e0e0e0;`;
+const Val = styled.p`margin:0; color:#ffbd66; font-weight:700; line-height:1.6;`;
+const SigText = styled.p`margin:6px 0 0 0; font-weight:700; color:${p=>p.color||'#a0a0a0'};`;
+const Strat = styled.div`background:linear-gradient(45deg,#2a2a2a,#333); border-radius:12px; padding:20px; display:flex; gap:20px; flex-wrap:wrap; justify-content:space-between;`;
+const Big = styled.p`font-size:48px; font-weight:800; margin:8px 0 0 0; color:${p=>p.s==='BUY'?'#28a745':p.s==='SELL'?'#dc3545':'#6c757d'};`;
+const StatsCard = styled(Card)`
+  grid-column: span 2;
+  @media (max-width: 1100px) { grid-column: span 1; }
 `;
-const Header = styled.header`
-  width: 100%; background: #ff8c00; padding: 15px; text-align: center; color: white;
-  font-size: 28px; font-weight: bold; box-shadow: 0 4px 8px rgba(255,140,0,0.4);
-  border-radius: 10px; margin-bottom: 20px;
-`;
-const AnalysisContainer = styled.div`
-  background: #1e1e1e; padding: 25px; border-radius: 12px; box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-  border: 1px solid #333; width: 100%; max-width: 1400px;
-`;
-const CardTitle = styled.h3`
-  color: #ff8c00; margin: 0 0 20px 0; font-size: 22px; border-bottom: 2px solid #ff8c00; padding-bottom: 10px;
-`;
-const SelectorContainer = styled.div` margin-bottom: 20px; display: flex; align-items: center; gap: 15px; `;
-const StockSelector = styled.select`
-  padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.3);
-  outline: none; background: #333; color: white; font-size: 16px; font-weight: bold;
-`;
-const IndicatorGrid = styled.div` display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; `;
-const IndicatorCard = styled.div`
-  background: #2a2a2a; padding: 20px; border-radius: 10px; border-left: 5px solid ${p => p.color || '#ff8c00'};
-`;
-const IndicatorTitle = styled.h4` margin: 0 0 10px 0; font-size: 18px; color: #e0e0e0; `;
-const IndicatorValue = styled.p` font-size: 24px; font-weight: bold; margin: 0 0 5px 0; color: #ff8c00; `;
-const IndicatorSignal = styled.p` font-size: 14px; margin: 0; font-weight: bold; color: ${p => p.color || '#a0a0a0'}; `;
-const StrategyCard = styled.div`
-  background: linear-gradient(45deg, #2a2a2a, #333); padding: 25px; border-radius: 12px; margin-top: 20px;
-  display: flex; justify-content: space-around; align-items: center; flex-wrap: wrap; gap: 20px;
-`;
-const SignalDisplay = styled.div` text-align: center; `;
-const SignalLabel = styled.p` margin: 0; font-size: 18px; color: #a0a0a0; text-transform: uppercase; `;
-const SignalValue = styled.p`
-  margin: 5px 0 0 0; font-size: 48px; font-weight: bold;
-  color: ${p => (p.signal === 'BUY' ? '#28a745' : p.signal === 'SELL' ? '#dc3545' : '#6c757d')};
-`;
-const StrategyDetails = styled.div` flex: 1; min-width: 300px; `;
-const DetailItem = styled.p` margin: 8px 0; font-size: 16px; strong { color: #ff8c00; margin-right: 8px; }`;
 
 /* =========================================================================
-   6) COMPONENT
+   6) PAGE
    ========================================================================= */
-function MarketTrendAnalysis() {
-  const [selectedCountry, setSelectedCountry] = useState('TH');
-  const [selectedStock, setSelectedStock] = useState(DEFAULT_SYMBOL_BY_COUNTRY['TH']);
+export default function MarketTrendAnalysis() {
+  const { search } = useLocation();
+  const qs = useMemo(() => new URLSearchParams(search), [search]);
 
-  const [symbols, setSymbols] = useState([]); // [{symbol,name}]
-  const [series, setSeries] = useState([]);   // [{date, OpenPrice, HighPrice, LowPrice, ClosePrice, Volume}]
-  const [latest, setLatest] = useState(null); // {Date, ClosePrice,...}
+  const qMarket = qs.get('market');   // 'Thailand'|'America'
+  const qSymbol = qs.get('symbol');   // e.g. 'PTT'
+  const qTf     = qs.get('timeframe') || DEFAULT_TF;
 
-  const [loading, setLoading] = useState(false);
+  const initCountry = MARKET_TO_COUNTRY[qMarket] || 'TH';
+  const initSymbol  = qSymbol || DEFAULT_SYMBOL_BY_COUNTRY[initCountry];
+
+  const [country, setCountry] = useState(initCountry);
+  const [symbol, setSymbol] = useState(initSymbol);
+  const [tf, setTf] = useState(qTf);
+
+  const [symbols, setSymbols] = useState([]);
+  const [series, setSeries] = useState([]);
   const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  /* ---- โหลดรายชื่อหุ้นตามตลาด ---- */
+  const market = COUNTRY_TO_MARKET[country];
+
+  // ดึงรายชื่อหุ้น
   useEffect(() => {
-    const run = async () => {
+    (async () => {
       try {
         setErr('');
-        const market = COUNTRY_TO_MARKET[selectedCountry];
-        const url = `${API_BASE}/symbols?market=${encodeURIComponent(market)}`;
-        const { data } = await axios.get(url, getAuthHeaders());
-        const list = (data?.data || []).map((r) => ({
-          symbol: r.StockSymbol,
-          name: r.CompanyName || r.StockSymbol,
-        }));
+        const { data } = await axios.get(`${API_BASE}/symbols?market=${encodeURIComponent(market)}`, auth());
+        const list = (data?.data || []).map(r => ({ symbol: r.StockSymbol, name: r.CompanyName || r.StockSymbol }));
         setSymbols(list);
-
-        // ตั้ง symbol ตั้งต้นให้เหมาะกับประเทศ
-        const def = DEFAULT_SYMBOL_BY_COUNTRY[selectedCountry];
-        setSelectedStock(def || (list[0]?.symbol || ''));
+        if (!list.some(x => x.symbol === symbol)) {
+          setSymbol(DEFAULT_SYMBOL_BY_COUNTRY[country] || list[0]?.symbol || '');
+        }
       } catch (e) {
         console.error(e);
         setErr(e?.response?.data?.error || 'โหลดรายชื่อหุ้นไม่สำเร็จ');
         setSymbols([]);
-        setSelectedStock('');
       }
-    };
-    run();
-  }, [selectedCountry]);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [country]);
 
-  /* ---- โหลด series + latest เมื่อเลือกหุ้น ---- */
+  // ดึงซีรีส์ข้อมูล
   useEffect(() => {
-    if (!selectedStock) return;
-    const controller = new AbortController(); // ยกเลิกคำขอเก่าถ้ามีการสลับเร็ว ๆ
+    if (!symbol) return;
+    const controller = new AbortController();
     (async () => {
       try {
         setLoading(true); setErr('');
-        const url = `${API_BASE}/data?symbol=${encodeURIComponent(selectedStock)}&limit=${SERIES_LIMIT}`;
-        const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
-        setSeries(data?.series || []);
-        setLatest(data?.latest || null);
+        const need = Math.max(TF_LIMIT[tf] ?? TF_LIMIT[DEFAULT_TF], INDICATOR_MIN);
+        const { data } = await axios.get(`${API_BASE}/data?symbol=${encodeURIComponent(symbol)}&limit=${need}`, { ...auth(), signal: controller.signal });
+        const raw = data?.series || [];
+        const cleaned = raw.filter(r => Number(r?.Volume) > 0); // ข้ามวันหยุด
+        setSeries(cleaned);
       } catch (e) {
         if (e.name === 'CanceledError') return;
         console.error(e);
         setErr(e?.response?.data?.error || 'โหลดข้อมูลหุ้นไม่สำเร็จ');
-        setSeries([]); setLatest(null);
+        setSeries([]);
       } finally {
         setLoading(false);
       }
     })();
     return () => controller.abort();
-  }, [selectedStock]);
+  }, [symbol, tf]);
 
-  /* ---- คำนวณอินดิเคเตอร์ + สัญญาณ ---- */
-  const technical = useMemo(() => computeTechnical(series), [series]);
+  // window สำหรับคำนวณอินดี้ตาม timeframe
+  const win = useMemo(() => {
+    if (!series.length) return [];
+    if (tf === 'ALL') return series;
+    const n = TF_LIMIT[tf] ?? TF_LIMIT[DEFAULT_TF];
+    return series.slice(-n);
+  }, [series, tf]);
 
-  /* ---- UI ---- */
-  const availableStocks = useMemo(() => symbols.map((s) => s.symbol), [symbols]);
-  const marketName = COUNTRY_TO_MARKET[selectedCountry];
+  // คำนวณอินดี้ล่าสุดในหน้าต่าง
+  const tech = useMemo(() => computeTechnical(win), [win]);
+
+  // สถิติ timeframe (Return, Vol, MDD)
+  const tfStats = useMemo(() => {
+    if (!win.length) return null;
+    const closes = win.map(d => Number(d.ClosePrice)).filter(Number.isFinite);
+    if (!closes.length) return null;
+    const ret = (closes.at(-1) - closes[0]) / closes[0];
+    const rets = [];
+    for (let i = 1; i < closes.length; i++) {
+      if (Number.isFinite(closes[i]) && Number.isFinite(closes[i - 1])) {
+        rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+      }
+    }
+    const vol = stdev(rets);
+    const mdd = maxDrawdown(closes); // negative
+    return { bars: closes.length, returnPct: ret * 100, volPct: vol * 100, mddPct: mdd * 100 };
+  }, [win]);
+
+  // backtest ซีรีส์เต็ม
+  const bt = useMemo(() => backtestFull(series), [series]);
 
   return (
-    <MainContent>
+    <Main>
       <Header>Market Trend Analysis</Header>
-      <AnalysisContainer>
-        <CardTitle>Technical Indicator Analysis</CardTitle>
+      <Box>
+        <H3>Technical Indicator Analysis</H3>
 
-        <SelectorContainer>
-          <label htmlFor="country-select" style={{ fontWeight: 'bold' }}>Select Market:</label>
-          <StockSelector
-            id="country-select"
-            value={selectedCountry}
-            onChange={(e) => setSelectedCountry(e.target.value)}
-          >
+        <Row>
+          <label><b>Select Market:&nbsp;</b></label>
+          <Select value={country} onChange={e => setCountry(e.target.value)}>
             <option value="TH">Thailand (TH)</option>
             <option value="USA">United States (USA)</option>
-          </StockSelector>
+          </Select>
 
-          <label htmlFor="stock-select" style={{ fontWeight: 'bold' }}>Select Stock:</label>
-          <StockSelector
-            id="stock-select"
-            value={selectedStock}
-            onChange={(e) => setSelectedStock(e.target.value)}
-          >
-            {availableStocks.map((sym) => (
-              <option key={sym} value={sym}>{sym}</option>
-            ))}
-          </StockSelector>
-        </SelectorContainer>
+          <label><b>Select Stock:&nbsp;</b></label>
+          <Select value={symbol} onChange={e => setSymbol(e.target.value)}>
+            {symbols.map(s => <option key={s.symbol} value={s.symbol}>{s.symbol}</option>)}
+          </Select>
 
-        {err && <p style={{ color: '#dc3545', marginBottom: 12 }}>{err}</p>}
-        {loading && <p style={{ color: '#a0a0a0' }}>Loading technical data...</p>}
+          <label><b>Timeframe:&nbsp;</b></label>
+          <Select value={tf} onChange={e => setTf(e.target.value)}>
+            {Object.keys(TF_LIMIT).map(k => <option key={k} value={k}>{k}</option>)}
+          </Select>
+        </Row>
 
-        {technical ? (
+        {err && <p style={{color:'#dc3545'}}>{err}</p>}
+        {loading && <p style={{color:'#a0a0a0'}}>Loading…</p>}
+
+        {tech ? (
           <>
-            <IndicatorGrid>
-              <IndicatorCard color={technical.ma.color}>
-                <IndicatorTitle>Moving Averages (MA)</IndicatorTitle>
-                <IndicatorValue>
-                  {`MA50: ${technical.ma.ma50 != null ? technical.ma.ma50.toFixed(2) : '-'}`}<br />
-                  {`MA200: ${technical.ma.ma200 != null ? technical.ma.ma200.toFixed(2) : '-'}`}
-                </IndicatorValue>
-                <IndicatorSignal color={technical.ma.color}>{technical.ma.signal}</IndicatorSignal>
-              </IndicatorCard>
+            {/* แถวอินดี้ 4 การ์ด */}
+            <Grid>
+              <Card color={tech.v.ma50 != null && tech.v.ma200 != null ? (tech.v.ma50 > tech.v.ma200 ? '#28a745' : '#dc3545') : '#6c757d'}>
+                <Title>Moving Averages (MA / EMA)</Title>
+                <Val>
+                  MA50: {tech.v.ma50 != null ? tech.v.ma50.toFixed(2) : '-'}<br/>
+                  MA200: {tech.v.ma200 != null ? tech.v.ma200.toFixed(2) : '-'}<br/>
+                  EMA10: {tech.v.ema10 != null ? tech.v.ema10.toFixed(2) : '-'} &nbsp;|&nbsp;
+                  EMA20: {tech.v.ema20 != null ? tech.v.ema20.toFixed(2) : '-'}<br/>
+                  EMA12: {tech.v.ema12 != null ? tech.v.ema12.toFixed(2) : '-'} &nbsp;|&nbsp;
+                  EMA26: {tech.v.ema26 != null ? tech.v.ema26.toFixed(2) : '-'}
+                </Val>
+                <SigText color={tech.v.ma50 != null && tech.v.ma200 != null ? (tech.v.ma50 > tech.v.ma200 ? '#28a745' : '#dc3545') : '#6c757d'}>
+                  {tech.v.ma50 != null && tech.v.ma200 != null
+                    ? (tech.v.ma50 > tech.v.ma200 ? 'Golden Cross (Uptrend Bias)' : 'Death Cross (Downtrend Bias)')
+                    : 'Neutral'}
+                </SigText>
+              </Card>
 
-              <IndicatorCard color={technical.rsi.color}>
-                <IndicatorTitle>RSI (14)</IndicatorTitle>
-                <IndicatorValue>{technical.rsi.value != null ? technical.rsi.value.toFixed(2) : '-'}</IndicatorValue>
-                <IndicatorSignal color={technical.rsi.color}>{technical.rsi.signal}</IndicatorSignal>
-              </IndicatorCard>
+              <Card color={tech.v.rsi != null ? (tech.v.rsi >= 70 ? '#dc3545' : tech.v.rsi > 50 ? '#28a745' : '#dc3545') : '#6c757d'}>
+                <Title>RSI (14)</Title>
+                <Val style={{fontSize:24}}>{tech.v.rsi != null ? tech.v.rsi.toFixed(2) : '-'}</Val>
+                <SigText color={tech.v.rsi != null ? (tech.v.rsi >= 70 ? '#dc3545' : tech.v.rsi > 50 ? '#28a745' : '#dc3545') : '#6c757d'}>
+                  {tech.v.rsi == null ? 'Neutral' :
+                    tech.v.rsi >= 70 ? 'Overbought' :
+                    tech.v.rsi <= 30 ? 'Oversold' :
+                    tech.v.rsi > 50 ? 'Bullish Momentum' : 'Bearish Momentum'}
+                </SigText>
+              </Card>
 
-              <IndicatorCard color={technical.macd.color}>
-                <IndicatorTitle>MACD</IndicatorTitle>
-                <IndicatorValue>
-                  {`MACD: ${technical.macd.value != null ? technical.macd.value.toFixed(4) : '-'}`}<br />
-                  {`Signal: ${technical.macd.signalLine != null ? technical.macd.signalLine.toFixed(4) : '-'}`}
-                </IndicatorValue>
-                <IndicatorSignal color={technical.macd.color}>{technical.macd.text}</IndicatorSignal>
-              </IndicatorCard>
+              <Card color={tech.v.macd != null && tech.v.macdSig != null ? (tech.v.macd > tech.v.macdSig ? '#28a745' : '#dc3545') : '#6c757d'}>
+                <Title>MACD (12,26,9)</Title>
+                <Val>
+                  MACD: {tech.v.macd != null ? tech.v.macd.toFixed(4) : '-'}<br/>
+                  Signal: {tech.v.macdSig != null ? tech.v.macdSig.toFixed(4) : '-'}
+                </Val>
+                <SigText color={tech.v.macd != null && tech.v.macdSig != null ? (tech.v.macd > tech.v.macdSig ? '#28a745' : '#dc3545') : '#6c757d'}>
+                  {tech.v.macd != null && tech.v.macdSig != null
+                    ? (tech.v.macd > tech.v.macdSig ? 'Bullish Crossover' : 'Bearish Crossover')
+                    : 'Neutral'}
+                </SigText>
+              </Card>
 
-              <IndicatorCard color={technical.bb.color}>
-                <IndicatorTitle>Bollinger Bands</IndicatorTitle>
-                <IndicatorValue>
-                  {`Upper: ${technical.bb.upper != null ? technical.bb.upper.toFixed(2) : '-'}`}<br />
-                  {`Middle: ${technical.bb.middle != null ? technical.bb.middle.toFixed(2) : '-'}`}<br />
-                  {`Lower: ${technical.bb.lower != null ? technical.bb.lower.toFixed(2) : '-'}`}
-                </IndicatorValue>
-                <IndicatorSignal color={technical.bb.color}>{technical.bb.text}</IndicatorSignal>
-              </IndicatorCard>
-            </IndicatorGrid>
+              <Card color={tech.price != null && tech.v.bbUp != null && tech.v.bbLo != null ? (tech.price >= tech.v.bbUp ? '#dc3545' : tech.price <= tech.v.bbLo ? '#28a745' : '#6c757d') : '#6c757d'}>
+                <Title>Bollinger Bands (20,2)</Title>
+                <Val>
+                  Upper: {tech.v.bbUp != null ? tech.v.bbUp.toFixed(2) : '-'}<br/>
+                  Middle: {tech.v.bbMd != null ? tech.v.bbMd.toFixed(2) : '-'}<br/>
+                  Lower: {tech.v.bbLo != null ? tech.v.bbLo.toFixed(2) : '-'}
+                </Val>
+                <SigText color={tech.price != null && tech.v.bbUp != null && tech.v.bbLo != null ? (tech.price >= tech.v.bbUp ? '#dc3545' : tech.price <= tech.v.bbLo ? '#28a745' : '#6c757d') : '#6c757d'}>
+                  {tech.price != null && tech.v.bbUp != null && tech.v.bbLo != null
+                    ? (tech.price >= tech.v.bbUp ? 'Price at/above Upper Band'
+                      : tech.price <= tech.v.bbLo ? 'Price at/below Lower Band'
+                      : 'Price near Middle Band')
+                    : 'Price near Middle Band'}
+                </SigText>
+              </Card>
+            </Grid>
 
-            <CardTitle style={{ marginTop: '40px' }}>Strategy & Signals</CardTitle>
-            <StrategyCard>
-              <SignalDisplay>
-                <SignalLabel>LATEST SIGNAL</SignalLabel>
-                <SignalValue signal={technical.strategy.latestSignal}>
-                  {technical.strategy.latestSignal}
-                </SignalValue>
-              </SignalDisplay>
+            {/* Window Stats แยกเป็นบล็อกใหญ่ */}
+            <Grid style={{ marginTop: 20 }}>
+              <StatsCard color="#ff8c00">
+                <Title>Window Stats ({tf})</Title>
+                <Val>
+                  Bars: {tfStats?.bars ?? '-'}<br/>
+                  Return: {tfStats ? `${tfStats.returnPct.toFixed(2)}%` : '-'}<br/>
+                  Volatility (sd): {tfStats ? `${tfStats.volPct.toFixed(2)}%` : '-'}<br/>
+                  Max Drawdown: {tfStats ? `${tfStats.mddPct.toFixed(2)}%` : '-'}
+                </Val>
+                <SigText>Calculated on last {win.length} bars</SigText>
+              </StatsCard>
+            </Grid>
 
-              <StrategyDetails>
-                <DetailItem>
-                  <strong>Reason:</strong>
-                  <span>{technical.strategy.reason}</span>
-                </DetailItem>
-                <DetailItem>
-                  <strong>Signal Price:</strong>
-                  <span>
-                    {technical.strategy.signalPrice != null
-                      ? formatMoney(technical.strategy.signalPrice, marketName)
-                      : 'N/A'}
-                  </span>
-                </DetailItem>
-                <DetailItem>
-                  <strong>Confidence:</strong>
-                  <span>{Math.round(technical.strategy.confidence * 100)}%</span>
-                </DetailItem>
-                <DetailItem>
-                  <strong>Strategy Effectiveness (mini-backtest):</strong>
-                  <span>
-                    {technical.strategy.effectiveness}%{technical.strategy.total
-                      ? ` (hits ${technical.strategy.hits}/${technical.strategy.total}, lookahead ${technical.strategy.lookahead})`
-                      : ''}
-                  </span>
-                </DetailItem>
-              </StrategyDetails>
-            </StrategyCard>
+            <H3 style={{marginTop:30}}>Strategy & Signals</H3>
+            <Strat>
+              <div>
+                <p style={{margin:0, color:'#a0a0a0'}}>LATEST SIGNAL</p>
+                <Big s={tech.signal}>{tech.signal}</Big>
+              </div>
+              <div style={{minWidth:300}}>
+                <p><b>Reason:</b> {tech.signal === 'HOLD' ? 'สภาวะยังไม่ชัดเจน (คะแนนกลาง ๆ)' : tech.reasons.slice(0,3).join(' • ')}</p>
+                <p><b>Signal Price:</b> {fmtMoney(tech.price, market)}</p>
+                <p><b>Confidence:</b> {tech.confidence}%</p>
+                {bt.total >= 20 ? (
+                  <p><b>Strategy Effectiveness (mini-backtest):</b> {bt.effectiveness}% (hits {bt.hits}/{bt.total}, lookahead {bt.lookahead})</p>
+                ) : (
+                  <p style={{color:'#9ca3af'}}>Backtest not shown (insufficient signals in full history).</p>
+                )}
+              </div>
+            </Strat>
           </>
         ) : (
-          <p style={{ color: '#a0a0a0' }}>Loading technical data...</p>
+          <p style={{color:'#a0a0a0'}}>Loading technical data…</p>
         )}
-      </AnalysisContainer>
-    </MainContent>
+      </Box>
+    </Main>
   );
 }
-
-export default MarketTrendAnalysis;
