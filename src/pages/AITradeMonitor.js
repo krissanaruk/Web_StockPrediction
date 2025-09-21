@@ -4,7 +4,7 @@ import styled from 'styled-components';
 import axios from 'axios';
 
 // === API ของ AI Auto Trades (ใช้ตาราง autotrade) ===
-const API_URL = 'http://localhost:3000/api/admin/ai-auto-trades';
+const API_URL = 'http://localhost:3000/api/admin/ai-trades';
 const getAuthHeaders = () => {
   const token = localStorage.getItem('adminToken');
   return { headers: { Authorization: `Bearer ${token}` } };
@@ -68,7 +68,6 @@ const StatusBadge = styled.span`
     return '#bdbdbd';
   }};
 `;
-
 const PaginationContainer = styled.div`
   display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 20px;
 `;
@@ -79,6 +78,10 @@ const PageButton = styled.button`
   font-weight: bold; transition: background-color 0.3s, color 0.3s;
   &:hover:not(:disabled) { background-color: #ff8c00; color: #1e1e1e; }
   &:disabled { opacity: 0.5; cursor: not-allowed; }
+`;
+const FeedbackMessage = styled.p`
+  text-align: center; padding: 14px 10px;
+  color: ${p => (p.isError ? '#dc3545' : '#a0a0a0')};
 `;
 
 function AITradeMonitor() {
@@ -101,13 +104,12 @@ function AITradeMonitor() {
       const payload = res.data || {};
       const rows = Array.isArray(payload.data) ? payload.data : [];
 
-      // map คอลัมน์จาก API → shape ที่หน้า UI ใช้
       const mapped = rows.map(r => ({
         id: r.AutoTradeID,
         timestamp: r.TradeDate,
         user: r.Username || String(r.UserID),
         symbol: r.StockSymbol,
-        action: String(r.TradeType || '').toLowerCase(), // buy | sell
+        action: String(r.TradeType || '').toLowerCase(),
         quantity: r.Quantity,
         price: r.Price,
         status: r.Status,
@@ -122,8 +124,7 @@ function AITradeMonitor() {
       setTotalTrades(pg.totalTrades || 0);
     } catch (err) {
       console.error('Error loading AI trades:', err?.response?.status, err?.response?.data || err);
-      // แสดงตารางเปล่าพร้อมหัวคอลัมน์ (ไม่แสดงกล่อง error แยก)
-      setError(err?.response?.data?.error || ''); // เก็บไว้ log เฉยๆ
+      setError(err?.response?.data?.error || 'Failed to load AI trades.');
       setTrades([]);
       setTotalPages(1);
       setTotalTrades(0);
@@ -137,7 +138,7 @@ function AITradeMonitor() {
   const goPrev = () => page > 1 && fetchTrades(page - 1);
   const goNext = () => page < totalPages && fetchTrades(page + 1);
 
-  const COLSPAN = 8; // จำนวนคอลัมน์ทั้งหมดด้านล่าง
+  const COLSPAN = 8;
 
   return (
     <MainContent>
@@ -159,23 +160,9 @@ function AITradeMonitor() {
 
           <tbody>
             {isLoading ? (
-              <TableRow><TableCell colSpan={COLSPAN} style={{ color:'#a0a0a0' }}>Loading...</TableCell></TableRow>
-            ) : trades.length === 0 ? (
-              // ✅ ไม่มีข้อมูล → โชว์แถว placeholder แต่หัวคอลัมน์ยังอยู่
-              <>
-                {[...Array(3)].map((_, i) => (
-                  <TableRow key={`empty-${i}`}>
-                    <TableCell>—</TableCell>
-                    <TableCell>—</TableCell>
-                    <TableCell>—</TableCell>
-                    <TableCell><ActionBadge action="buy">—</ActionBadge></TableCell>
-                    <TableCell>—</TableCell>
-                    <TableCell>—</TableCell>
-                    <TableCell><StatusBadge status="">—</StatusBadge></TableCell>
-                    <TableCell>—</TableCell>
-                  </TableRow>
-                ))}
-              </>
+              <TableRow>
+                <TableCell colSpan={COLSPAN} style={{ color: '#a0a0a0' }}>Loading...</TableCell>
+              </TableRow>
             ) : (
               trades.map(trade => (
                 <TableRow key={trade.id}>
@@ -192,6 +179,11 @@ function AITradeMonitor() {
             )}
           </tbody>
         </TradeTable>
+
+        {!isLoading && !!error && <FeedbackMessage isError>{error}</FeedbackMessage>}
+        {!isLoading && !error && trades.length === 0 && (
+          <FeedbackMessage>No AI trades found.</FeedbackMessage>
+        )}
 
         <PaginationContainer>
           <PageButton onClick={goPrev} disabled={page <= 1}>ก่อนหน้า</PageButton>

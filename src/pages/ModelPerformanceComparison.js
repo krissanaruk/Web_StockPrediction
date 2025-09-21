@@ -18,7 +18,7 @@ const DEFAULT_WINDOW  = 'ALL';
 const DEFAULT_SYMBOL_BY_COUNTRY = { TH: 'ADVANC', USA: 'AAPL' };
 
 // ใช้ mock จนกว่า /api/model-performance จะพร้อม
-const USE_SERVER_PERFORMANCE = false;
+const USE_SERVER_PERFORMANCE = true;
 
 // window + limit ที่ใช้ดึงข้อมูล
 const WINDOWS = [
@@ -98,15 +98,15 @@ const calcTrendAccuracy = (actual, pred) => {
 
 function buildChartRows(perfRows = []) {
   return perfRows.map(r => {
-    const absL = Math.abs(r.actual - r.lstm);
-    const absG = Math.abs(r.actual - r.gru);
-    const absE = Math.abs(r.actual - r.ensemble);
-    const best = (() => {
-      const m = Math.min(absL, absG, absE);
-      if (m === absE) return 'ENSEMBLE';
-      if (m === absG) return 'GRU';
-      return 'LSTM';
-    })();
+    const err = (pred) => (pred == null ? Infinity : Math.abs(r.actual - pred));
+
+    const absL = err(r.lstm);
+    const absG = err(r.gru);
+    const absE = err(r.ensemble);
+
+    const min = Math.min(absL, absG, absE);
+    const best = (min === absE) ? 'ENSEMBLE' : (min === absG ? 'GRU' : 'LSTM');
+
     return {
       date: r.date,
       actual: r.actual,
@@ -120,6 +120,7 @@ function buildChartRows(perfRows = []) {
     };
   });
 }
+
 
 /* =========================================================================
  * STYLED
@@ -252,50 +253,60 @@ export default function ModelPerformanceComparison() {
   useEffect(() => {
     const controller = new AbortController();
 
-    const fetchOneSymbolPerf = async (sym, limit) => {
-      const url = `${API_BASE}/market-trend/data?symbol=${encodeURIComponent(sym)}&limit=${limit}`;
-      const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
-      const s = (data?.series || []).map(r => ({ date: r.date, actual: Number(r.ClosePrice) }));
+const fetchOneSymbolPerf = async (sym, limit) => {
+  const url = `${API_BASE}/market-trend/data?symbol=${encodeURIComponent(sym)}&limit=${limit}`;
+  const { data } = await axios.get(url, getAuthHeaders());
+  const s = (data?.series || []).map(r => ({ date: r.date, actual: Number(r.ClosePrice) }));
 
-      if (USE_SERVER_PERFORMANCE && s.length > 1) {
-        const start = s[0].date, end = s[s.length - 1].date;
-        const perfUrl = `${API_BASE}/model-performance?symbol=${encodeURIComponent(sym)}&start=${start}&end=${end}`;
-        const { data: perfResp } = await axios.get(perfUrl, getAuthHeaders());
-        const rows = perfResp?.data || [];
-        const A = rows.map(r => Number(r.ClosePrice));
-        const L = rows.map(r => Number(r.PredictionClose_LSTM));
-        const G = rows.map(r => Number(r.PredictionClose_GRU));
-        const E = rows.map(r => Number(r.PredictionClose_Ensemble));
-        return {
-          rows: rows.map(r => ({
-            date: r.Date?.slice(0,10) || r.date,
-            actual: Number(r.ClosePrice),
-            lstm: Number(r.PredictionClose_LSTM),
-            gru: Number(r.PredictionClose_GRU),
-            ensemble: Number(r.PredictionClose_Ensemble),
-          })),
-          metrics: {
-            LSTM: { RMSE: calcRMSE(A, L), MAPE: calcMAPE(A, L), TrendAcc: calcTrendAccuracy(A, L) },
-            GRU:  { RMSE: calcRMSE(A, G), MAPE: calcMAPE(A, G), TrendAcc: calcTrendAccuracy(A, G) },
-            ENSEMBLE: { RMSE: calcRMSE(A, E), MAPE: calcMAPE(A, E), TrendAcc: calcTrendAccuracy(A, E) },
-          }
-        };
-      } else {
-        const { lstm, gru, ensemble } = buildMockPredictions(s.map(x => x.actual));
-        const A = s.map(x => x.actual), L = lstm, G = gru, E = ensemble;
-        return {
-          rows: s.map((r, i) => ({
-            date: r.date, actual: r.actual,
-            lstm: L[i] ?? r.actual, gru: G[i] ?? r.actual, ensemble: E[i] ?? r.actual,
-          })),
-          metrics: {
-            LSTM: { RMSE: calcRMSE(A, L), MAPE: calcMAPE(A, L), TrendAcc: calcTrendAccuracy(A, L) },
-            GRU:  { RMSE: calcRMSE(A, G), MAPE: calcMAPE(A, G), TrendAcc: calcTrendAccuracy(A, G) },
-            ENSEMBLE: { RMSE: calcRMSE(A, E), MAPE: calcMAPE(A, E), TrendAcc: calcTrendAccuracy(A, E) },
-          }
-        };
+  if (USE_SERVER_PERFORMANCE && s.length > 1) {
+    const start = s[0].date, end = s[s.length - 1].date;
+    const perfUrl = `${API_BASE}/model-performance?symbol=${encodeURIComponent(sym)}&start=${start}&end=${end}`;
+    const { data: perfResp } = await axios.get(perfUrl, getAuthHeaders());
+    const rows = perfResp?.data || [];
+
+    const numOrNull = (x) => (x == null ? null : Number(x));
+    const toDateStr = (d) => {
+      if (!d) return '';
+      if (typeof d === 'string') return d.slice(0,10);
+      try { return new Date(d).toISOString().slice(0,10); } catch { return ''; }
+    };
+
+    const A = rows.map(r => Number(r.ClosePrice));
+    const L = rows.map(r => numOrNull(r.PredictionClose_LSTM));
+    const G = rows.map(r => numOrNull(r.PredictionClose_GRU));
+    const E = rows.map(r => numOrNull(r.PredictionClose_Ensemble));
+
+    return {
+      rows: rows.map((r, i) => ({
+        date: toDateStr(r.date || r.Date),
+        actual: Number(r.ClosePrice),
+        lstm: L[i],
+        gru: G[i],
+        ensemble: E[i],
+      })),
+      metrics: {
+        LSTM:     { RMSE: calcRMSE(A, L), MAPE: calcMAPE(A, L), TrendAcc: calcTrendAccuracy(A, L) },
+        GRU:      { RMSE: calcRMSE(A, G), MAPE: calcMAPE(A, G), TrendAcc: calcTrendAccuracy(A, G) },
+        ENSEMBLE: { RMSE: calcRMSE(A, E), MAPE: calcMAPE(A, E), TrendAcc: calcTrendAccuracy(A, E) },
       }
     };
+  } else {
+    const { lstm, gru, ensemble } = buildMockPredictions(s.map(x => x.actual));
+    const A = s.map(x => x.actual), L = lstm, G = gru, E = ensemble;
+    return {
+      rows: s.map((r, i) => ({
+        date: r.date, actual: r.actual,
+        lstm: L[i] ?? null, gru: G[i] ?? null, ensemble: E[i] ?? null,
+      })),
+      metrics: {
+        LSTM:     { RMSE: calcRMSE(A, L), MAPE: calcMAPE(A, L), TrendAcc: calcTrendAccuracy(A, L) },
+        GRU:      { RMSE: calcRMSE(A, G), MAPE: calcMAPE(A, G), TrendAcc: calcTrendAccuracy(A, G) },
+        ENSEMBLE: { RMSE: calcRMSE(A, E), MAPE: calcMAPE(A, E), TrendAcc: calcTrendAccuracy(A, E) },
+      }
+    };
+  }
+};
+
 
     (async () => {
       try {
