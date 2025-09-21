@@ -39,6 +39,16 @@ const SidebarNavLink = styled(NavLink)`
   &.active { background-color: #ff8c00; color: #1e1e1e; }
 `;
 
+const SidebarDivider = styled.div`
+  height: 1px; width: 100%;
+  background: #2b2b2b; margin: 6px 0 10px 0;
+`;
+
+const SidebarSection = styled.div`
+  font-size: 12px; color: #9e9e9e; letter-spacing: .4px;
+  text-transform: uppercase; margin: 6px 0 2px 4px;
+`;
+
 const SidebarButton = styled.button`
   color: #e0e0e0;
   background: none;
@@ -84,14 +94,26 @@ const AdminLayout = () => {
           <h2 style={{ color: '#ff8c00', margin: 0 }}>📊 Admin Dashboard</h2>
         </LogoLink>
 
+        <SidebarSection>Overview</SidebarSection>
         <SidebarNavLink to="/dashboard" end>Overview</SidebarNavLink>
-        <SidebarNavLink to="/manageuser">User Management</SidebarNavLink>
-        <SidebarNavLink to="/ai-trade-monitoring">AI Trade History</SidebarNavLink>
-        <SidebarNavLink to="/user-trade-history">User Trade History</SidebarNavLink>  {/* <-- เพิ่มบรรทัดนี้ */}
+
+        <SidebarDivider />
+
+        <SidebarSection>Analytics</SidebarSection>
+        {/* ใช้ path เดียวกับ navigate จากกราฟ */}
+        <SidebarNavLink to="/market-trend">Market Trend Analysis</SidebarNavLink>
         <SidebarNavLink to="/model-performance-comparison">Model Performance Comparison</SidebarNavLink>
 
-        {/* ✅ ใช้ path เดียวกับ navigate จากกราฟ */}
-        <SidebarNavLink to="/market-trend">Market Trend Analysis</SidebarNavLink>
+        <SidebarDivider />
+
+        <SidebarSection>Trades</SidebarSection>
+        <SidebarNavLink to="/ai-trade-monitoring">AI Trade History</SidebarNavLink>
+        <SidebarNavLink to="/user-trade-history">User Trade History</SidebarNavLink>
+
+        <SidebarDivider />
+
+        <SidebarSection>Management</SidebarSection>
+        <SidebarNavLink to="/manageuser">User Management</SidebarNavLink>
 
         <SidebarButton onClick={handleLogout}>ออกจากระบบ</SidebarButton>
       </Sidebar>

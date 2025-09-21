@@ -1,11 +1,9 @@
-// src/pages/UserTradeHistory.js
 import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
 
-// === API (ชั่วคราวใช้ของ AI ก่อน) ===
-// TODO: เปลี่ยนเป็น /api/admin/trades?source=USER เมื่อพร้อม
-const API_URL = 'http://localhost:3000/api/admin/ai-trades';
+// === API Config ===
+const API_URL = 'http://localhost:3000/api/admin/user-trades';
 const getAuthHeaders = () => {
   const token = localStorage.getItem('adminToken');
   return { headers: { Authorization: `Bearer ${token}` } };
@@ -50,7 +48,7 @@ const TableRow = styled.tr` border-bottom: 1px solid #333; &:hover { background-
 const TableCell = styled.td` padding: 12px 15px; `;
 const ActionBadge = styled.span`
   padding: 4px 10px; border-radius: 5px; font-weight: bold; color: white; text-transform: uppercase;
-  background-color: ${p => p.action.toLowerCase() === 'buy' ? '#28a745' : '#dc3545'};
+  background-color: ${p => String(p.action || '').toLowerCase() === 'buy' ? '#22c55e' : '#ef4444'};
 `;
 const PaginationContainer = styled.div`
   display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 20px;
@@ -87,6 +85,7 @@ export default function UserTradeHistory() {
       const res = await axios.get(url, getAuthHeaders());
       const payload = res.data || {};
       const rows = Array.isArray(payload.data) ? payload.data : [];
+
       const mapped = rows.map(r => ({
         id: r.PaperTradeID,
         timestamp: r.TradeDate,
@@ -96,6 +95,7 @@ export default function UserTradeHistory() {
         quantity: r.Quantity,
         price: r.Price
       }));
+
       setTrades(mapped);
 
       const pg = payload.pagination || {};
@@ -103,8 +103,8 @@ export default function UserTradeHistory() {
       setTotalPages(pg.totalPages || 1);
       setTotalTrades(pg.totalTrades || 0);
     } catch (err) {
-      console.error('Error loading trades:', err?.response?.status, err?.response?.data || err);
-      setError(err?.response?.data?.error || 'Failed to load trades.');
+      console.error('Error loading user trades:', err?.response?.status, err?.response?.data || err);
+      setError(err?.response?.data?.error || 'Failed to load user trades.');
       setTrades([]); setTotalPages(1); setTotalTrades(0);
     } finally {
       setIsLoading(false);

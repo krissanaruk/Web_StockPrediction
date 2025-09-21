@@ -1,16 +1,16 @@
+// src/pages/AITradeMonitor.js
 import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
-// import { useNavigate } from 'react-router-dom'; // ถ้ายังไม่ใช้ คอมเมนต์ไว้ได้
 
-// === API Config ===
-const API_URL = 'http://localhost:3000/api/admin/ai-trades';
+// === API ของ AI Auto Trades (ใช้ตาราง autotrade) ===
+const API_URL = 'http://localhost:3000/api/admin/ai-auto-trades';
 const getAuthHeaders = () => {
   const token = localStorage.getItem('adminToken');
   return { headers: { Authorization: `Bearer ${token}` } };
 };
 
-// --- Helper Functions ---
+// --- Helpers ---
 const formatTimestamp = (isoString) => {
   if (!isoString) return 'N/A';
   return new Date(isoString).toLocaleString('en-GB', {
@@ -18,14 +18,13 @@ const formatTimestamp = (isoString) => {
     hour: '2-digit', minute: '2-digit',
   });
 };
-
 const formatPrice = (price) => {
-  const numPrice = Number(price);
-  if (isNaN(numPrice)) return '-';
-  return numPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const n = Number(price);
+  if (Number.isNaN(n)) return '-';
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
-// --- Styled Components (เหมือนเดิม) ---
+// --- Styled ---
 const MainContent = styled.div`
   flex: 1; display: flex; flex-direction: column; align-items: center;
   overflow-y: auto; padding: 20px; color: #e0e0e0;
@@ -33,7 +32,7 @@ const MainContent = styled.div`
 const Header = styled.header`
   width: 100%; background: #ff8c00; padding: 15px; text-align: center;
   color: white; font-size: 28px; font-weight: bold;
-  box-shadow: 0 4px 8px rgba(255, 140, 0, 0.4); border-radius: 10px; margin-bottom: 20px;
+  box-shadow: 0 4px 8px rgba(255,140,0,0.4); border-radius: 10px; margin-bottom: 20px;
 `;
 const TableContainer = styled.div`
   background: #1e1e1e; padding: 20px; border-radius: 10px;
@@ -57,24 +56,29 @@ const TableCell = styled.td`
 `;
 const ActionBadge = styled.span`
   padding: 4px 10px; border-radius: 5px; font-weight: bold; color: white; text-transform: uppercase;
-  background-color: ${props => props.action.toLowerCase() === 'buy' ? '#28a745' : '#dc3545'};
+  background-color: ${p => p.action?.toLowerCase() === 'buy' ? '#28a745' : '#dc3545'};
+`;
+const StatusBadge = styled.span`
+  padding: 4px 10px; border-radius: 5px; font-weight: bold; text-transform: uppercase; color: #111;
+  background-color: ${p => {
+    const s = String(p.status || '').toLowerCase();
+    if (s === 'filled' || s === 'done' || s === 'success') return '#98FB98';
+    if (s === 'pending' || s === 'open') return '#F8DE7E';
+    if (s === 'cancelled' || s === 'rejected' || s === 'error') return '#FF7F7F';
+    return '#bdbdbd';
+  }};
 `;
 
 const PaginationContainer = styled.div`
-  display: flex; justify-content: center; align-items: center;
-  gap: 10px; margin-top: 20px;
+  display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 20px;
 `;
 const PageButton = styled.button`
   padding: 8px 12px; border: 1px solid #ff8c00; border-radius: 5px; cursor: pointer;
-  color: ${props => props.active ? '#1e1e1e' : '#ff8c00'};
-  background-color: ${props => props.active ? '#ff8c00' : 'transparent'};
+  color: ${p => p.active ? '#1e1e1e' : '#ff8c00'};
+  background-color: ${p => p.active ? '#ff8c00' : 'transparent'};
   font-weight: bold; transition: background-color 0.3s, color 0.3s;
   &:hover:not(:disabled) { background-color: #ff8c00; color: #1e1e1e; }
   &:disabled { opacity: 0.5; cursor: not-allowed; }
-`;
-const FeedbackMessage = styled.p`
-  text-align: center; padding: 40px 20px; font-size: 18px;
-  color: ${props => (props.isError ? '#dc3545' : '#a0a0a0')};
 `;
 
 function AITradeMonitor() {
@@ -82,11 +86,11 @@ function AITradeMonitor() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // pagination state
+  // pagination
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalTrades, setTotalTrades] = useState(0);
-  const limit = 20; // ปรับได้ตามใจ
+  const limit = 20;
 
   const fetchTrades = async (pageToLoad = 1) => {
     setIsLoading(true);
@@ -99,14 +103,15 @@ function AITradeMonitor() {
 
       // map คอลัมน์จาก API → shape ที่หน้า UI ใช้
       const mapped = rows.map(r => ({
-        id: r.PaperTradeID,
+        id: r.AutoTradeID,
         timestamp: r.TradeDate,
-        user: r.Username || String(r.UserID),      // ใช้ UserID แสดงแทนชื่อไปก่อน
+        user: r.Username || String(r.UserID),
         symbol: r.StockSymbol,
-        action: String(r.TradeType || '').toLowerCase(), // 'buy' | 'sell'
+        action: String(r.TradeType || '').toLowerCase(), // buy | sell
         quantity: r.Quantity,
-        price: r.Price
-      
+        price: r.Price,
+        status: r.Status,
+        portfolioId: r.PaperPortfolioID
       }));
 
       setTrades(mapped);
@@ -116,8 +121,9 @@ function AITradeMonitor() {
       setTotalPages(pg.totalPages || 1);
       setTotalTrades(pg.totalTrades || 0);
     } catch (err) {
-      console.error('Error loading trades:', err?.response?.status, err?.response?.data || err);
-      setError(err?.response?.data?.error || 'Failed to load trades.');
+      console.error('Error loading AI trades:', err?.response?.status, err?.response?.data || err);
+      // แสดงตารางเปล่าพร้อมหัวคอลัมน์ (ไม่แสดงกล่อง error แยก)
+      setError(err?.response?.data?.error || ''); // เก็บไว้ log เฉยๆ
       setTrades([]);
       setTotalPages(1);
       setTotalTrades(0);
@@ -126,31 +132,17 @@ function AITradeMonitor() {
     }
   };
 
-  useEffect(() => {
-    fetchTrades(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => { fetchTrades(1); }, []);
 
-  const goPrev = () => {
-    if (page > 1) {
-      const target = page - 1;
-      fetchTrades(target);
-    }
-  };
-  const goNext = () => {
-    if (page < totalPages) {
-      const target = page + 1;
-      fetchTrades(target);
-    }
-  };
+  const goPrev = () => page > 1 && fetchTrades(page - 1);
+  const goNext = () => page < totalPages && fetchTrades(page + 1);
 
-  const renderContent = () => {
-    if (isLoading) return <FeedbackMessage>Loading trades...</FeedbackMessage>;
-    if (error) return <FeedbackMessage isError>{error}</FeedbackMessage>;
-    if (trades.length === 0) return <FeedbackMessage>No trades found.</FeedbackMessage>;
+  const COLSPAN = 8; // จำนวนคอลัมน์ทั้งหมดด้านล่าง
 
-    return (
-      <>
+  return (
+    <MainContent>
+      <Header>AI Trade History</Header>
+      <TableContainer>
         <TradeTable>
           <TableHead>
             <tr>
@@ -160,21 +152,44 @@ function AITradeMonitor() {
               <th>Action</th>
               <th>Quantity</th>
               <th>Price</th>
-              
+              <th>Status</th>
+              <th>Portfolio</th>
             </tr>
           </TableHead>
+
           <tbody>
-            {trades.map((trade) => (
-              <TableRow key={trade.id}>
-                <TableCell>{formatTimestamp(trade.timestamp)}</TableCell>
-                <TableCell>{trade.user}</TableCell>
-                <TableCell>{trade.symbol}</TableCell>
-                <TableCell><ActionBadge action={trade.action}>{trade.action}</ActionBadge></TableCell>
-                <TableCell>{trade.quantity}</TableCell>
-                <TableCell>${formatPrice(trade.price)}</TableCell>
-                
-              </TableRow>
-            ))}
+            {isLoading ? (
+              <TableRow><TableCell colSpan={COLSPAN} style={{ color:'#a0a0a0' }}>Loading...</TableCell></TableRow>
+            ) : trades.length === 0 ? (
+              // ✅ ไม่มีข้อมูล → โชว์แถว placeholder แต่หัวคอลัมน์ยังอยู่
+              <>
+                {[...Array(3)].map((_, i) => (
+                  <TableRow key={`empty-${i}`}>
+                    <TableCell>—</TableCell>
+                    <TableCell>—</TableCell>
+                    <TableCell>—</TableCell>
+                    <TableCell><ActionBadge action="buy">—</ActionBadge></TableCell>
+                    <TableCell>—</TableCell>
+                    <TableCell>—</TableCell>
+                    <TableCell><StatusBadge status="">—</StatusBadge></TableCell>
+                    <TableCell>—</TableCell>
+                  </TableRow>
+                ))}
+              </>
+            ) : (
+              trades.map(trade => (
+                <TableRow key={trade.id}>
+                  <TableCell>{formatTimestamp(trade.timestamp)}</TableCell>
+                  <TableCell>{trade.user}</TableCell>
+                  <TableCell>{trade.symbol}</TableCell>
+                  <TableCell><ActionBadge action={trade.action}>{trade.action}</ActionBadge></TableCell>
+                  <TableCell>{trade.quantity}</TableCell>
+                  <TableCell>${formatPrice(trade.price)}</TableCell>
+                  <TableCell><StatusBadge status={trade.status}>{String(trade.status || '').toUpperCase()}</StatusBadge></TableCell>
+                  <TableCell>{trade.portfolioId ?? '—'}</TableCell>
+                </TableRow>
+              ))
+            )}
           </tbody>
         </TradeTable>
 
@@ -185,15 +200,6 @@ function AITradeMonitor() {
           </span>
           <PageButton onClick={goNext} disabled={page >= totalPages}>ถัดไป</PageButton>
         </PaginationContainer>
-      </>
-    );
-  };
-
-  return (
-    <MainContent>
-      <Header>AI Trade History</Header>
-      <TableContainer>
-        {renderContent()}
       </TableContainer>
     </MainContent>
   );
