@@ -191,7 +191,7 @@ function AITradeMonitor() {
 
   return (
     <MainContent>
-      <Header>AI Trade Monitoring</Header>
+      <Header>AI Trade History</Header>
       <TableContainer>
         {renderContent()}
       </TableContainer>

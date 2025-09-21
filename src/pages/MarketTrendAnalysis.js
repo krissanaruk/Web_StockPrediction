@@ -13,10 +13,9 @@ const COUNTRY_TO_MARKET = { TH: 'Thailand', USA: 'America' };
 const MARKET_TO_COUNTRY = { Thailand: 'TH', America: 'USA' };
 const DEFAULT_SYMBOL_BY_COUNTRY = { TH: 'ADVANC', USA: 'AAPL' };
 
-/** Timeframe -> จำนวนแท่งที่จะใช้ในหน้าต่างคำนวณ/แสดงผล */
+/** Timeframe -> จำนวนแท่ง */
 const TF_LIMIT = {
-  '1D': 2,
-  '5D': 7,
+
   '1M': 22,
   '3M': 66,
   '6M': 132,
@@ -25,7 +24,7 @@ const TF_LIMIT = {
 };
 const DEFAULT_TF = '1M';
 
-/** โหลดขั้นต่ำให้ MA200/MACD/BB/RSI และ warmup พร้อมแน่ ๆ */
+/** โหลดลึกพอสำหรับ MA200/MACD/BB/RSI และวอร์มอัป */
 const LOOKBACKS = [200, 26 + 9, 20, 14]; // MA200, MACD(12,26,9), BB20, RSI14
 const WARMUP = 30;
 const LOOKAHEAD = 5;
@@ -54,6 +53,13 @@ const toNum = (v) => (v == null ? null : Number(v));
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const sign = (x) => (x > 0 ? 1 : x < 0 ? -1 : 0);
 
+const takeNum = (row, ...keys) => {
+  for (const k of keys) {
+    if (row[k] != null && row[k] !== '') return Number(row[k]);
+  }
+  return null;
+};
+
 const stdev = (arr) => {
   const v = arr.filter((x) => Number.isFinite(x));
   if (!v.length) return 0;
@@ -67,7 +73,7 @@ const maxDrawdown = (prices) => {
     peak = Math.max(peak, p);
     mdd = Math.min(mdd, (p - peak) / peak);
   }
-  return mdd; // negative number
+  return mdd; // negative
 };
 
 /* =========================================================================
@@ -151,35 +157,180 @@ const bb = (arr, period = 20, k = 2) => {
   return { upper: up, middle: mid, lower: lo };
 };
 
+/* ===== NEW: True Range & ATR (Wilder) ===== */
+const trueRange = (h, l, c) => {
+  const n = Math.max(h.length, l.length, c.length);
+  const tr = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    const hi = h[i], lo = l[i], pc = i > 0 ? c[i - 1] : null;
+    if (!Number.isFinite(hi) || !Number.isFinite(lo)) { tr[i] = null; continue; }
+    const a = hi - lo;
+    const b = (pc != null && Number.isFinite(pc)) ? Math.abs(hi - pc) : null;
+    const d = (pc != null && Number.isFinite(pc)) ? Math.abs(lo - pc) : null;
+    tr[i] = Math.max(a, b ?? -Infinity, d ?? -Infinity);
+  }
+  return tr;
+};
+const atr = (h, l, c, period = 14) => {
+  const tr = trueRange(h, l, c);
+  if (!tr.length) return [];
+  const out = new Array(tr.length).fill(null);
+  // initial ATR = average of first 'period' TR values after skipping nulls
+  let acc = 0, cnt = 0, start = -1;
+  for (let i = 0; i < tr.length; i++) {
+    if (tr[i] == null) continue;
+    acc += tr[i]; cnt++;
+    if (cnt === period) { out[i] = acc / period; start = i; break; }
+  }
+  if (start < 0) return out;
+  for (let i = start + 1; i < tr.length; i++) {
+    if (tr[i] == null || out[i - 1] == null) { out[i] = out[i - 1]; continue; }
+    out[i] = (out[i - 1] * (period - 1) + tr[i]) / period; // Wilder's smoothing
+  }
+  return out;
+};
+
+/* ===== NEW: Keltner Channel (EMA(typical,20) ± 2*ATR(10)) ===== */
+const keltner = (h, l, c, emaP = 20, atrP = 10, mult = 2) => {
+  const typical = h.map((_, i) => {
+    const hi = h[i], lo = l[i], cl = c[i];
+    return (Number.isFinite(hi) && Number.isFinite(lo) && Number.isFinite(cl)) ? (hi + lo + cl) / 3 : null;
+  });
+  const mid = ema(typical, emaP);
+  const a10 = atr(h, l, c, atrP);
+  const up = mid.map((m, i) => (m != null && a10[i] != null) ? m + mult * a10[i] : null);
+  const lo = mid.map((m, i) => (m != null && a10[i] != null) ? m - mult * a10[i] : null);
+  return { upper: up, middle: mid, lower: lo };
+};
+
+/* ===== NEW: Chaikin Volatility (EMA(H-L,n) ROC over k) ===== */
+const chaikinVolatility = (h, l, n = 10, k = 10) => {
+  const hl = h.map((_, i) => (Number.isFinite(h[i]) && Number.isFinite(l[i])) ? (h[i] - l[i]) : null);
+  const smooth = ema(hl, n);
+  const out = new Array(hl.length).fill(null);
+  for (let i = k; i < smooth.length; i++) {
+    const prev = smooth[i - k];
+    if (smooth[i] != null && prev != null && prev !== 0) {
+      out[i] = ((smooth[i] - prev) / prev) * 100;
+    } else {
+      out[i] = null;
+    }
+  }
+  return out;
+};
+
+/* ===== NEW: Donchian Channel (period) ===== */
+const donchian = (h, l, period = 20) => {
+  const up = new Array(h.length).fill(null);
+  const lo = new Array(h.length).fill(null);
+  for (let i = 0; i < h.length; i++) {
+    if (i < period - 1) continue;
+    let hh = -Infinity, ll = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (Number.isFinite(h[j])) hh = Math.max(hh, h[j]);
+      if (Number.isFinite(l[j])) ll = Math.min(ll, l[j]);
+    }
+    up[i] = hh !== -Infinity ? hh : null;
+    lo[i] = ll !== Infinity ? ll : null;
+  }
+  return { upper: up, lower: lo };
+};
+
+/* ===== NEW: PSAR (Parabolic SAR) ===== */
+const psar = (h, l, step = 0.02, maxStep = 0.2) => {
+  const n = Math.max(h.length, l.length);
+  if (n === 0) return [];
+  const out = new Array(n).fill(null);
+  let isUp = true;
+  let af = step;
+  let ep = h[0]; // extreme point
+  let sar = l[0];
+
+  // bootstrap second bar
+  if (Number.isFinite(h[1]) && Number.isFinite(l[1])) {
+    isUp = h[1] >= h[0];
+    ep = isUp ? Math.max(h[0], h[1]) : Math.min(l[0], l[1]);
+    sar = isUp ? Math.min(l[0], l[1]) : Math.max(h[0], h[1]);
+    out[1] = sar;
+  }
+
+  for (let i = 2; i < n; i++) {
+    if (!Number.isFinite(h[i]) || !Number.isFinite(l[i])) { out[i] = out[i - 1]; continue; }
+
+    sar = sar + af * (ep - sar);
+
+    // ในขาขึ้น SAR ห้ามสูงกว่า low ของสองแท่งก่อนหน้า
+    if (isUp) {
+      sar = Math.min(sar, l[i - 1], l[i - 2] ?? l[i - 1]);
+      if (h[i] > ep) { ep = h[i]; af = Math.min(af + step, maxStep); }
+      if (l[i] < sar) { // reverse
+        isUp = false;
+        sar = ep;
+        ep = l[i];
+        af = step;
+      }
+    } else { // ขาลง SAR ห้ามต่ำกว่า high ของสองแท่งก่อนหน้า
+      sar = Math.max(sar, h[i - 1], h[i - 2] ?? h[i - 1]);
+      if (l[i] < ep) { ep = l[i]; af = Math.min(af + step, maxStep); }
+      if (h[i] > sar) { // reverse
+        isUp = true;
+        sar = ep;
+        ep = h[i];
+        af = step;
+      }
+    }
+
+    out[i] = sar;
+  }
+  return out;
+};
+
 /* =========================================================================
    4) CORE CALC (คะแนน+สัญญาณ)
    ========================================================================= */
 function buildCtx(series) {
-  const c = series.map((d) => toNum(d.ClosePrice));
-  const ma50 = sma(c, 50), ma200 = sma(c, 200);
-  const ema10a = ema(c, 10), ema20a = ema(c, 20), ema12a = ema(c, 12), ema26a = ema(c, 26);
-  const r = rsi(c, 14);
-  const m = macd(c, 12, 26, 9);
-  const b = bb(c, 20, 2);
-  return { closes: c, ma50, ma200, ema10a, ema20a, ema12a, ema26a, rsi: r, macd: m, bb: b };
+  // รองรับชื่อคอลัมน์ High/Low หลายแบบ
+  const closes = series.map((d) => takeNum(d, 'ClosePrice', 'Close', 'Adj Close', 'AdjClose'));
+  const highs  = series.map((d) => takeNum(d, 'HighPrice', 'High'));
+  const lows   = series.map((d) => takeNum(d, 'LowPrice', 'Low'));
+
+  const ma50 = sma(closes, 50), ma200 = sma(closes, 200);
+  const ema10a = ema(closes, 10), ema20a = ema(closes, 20), ema12a = ema(closes, 12), ema26a = ema(closes, 26);
+  const r = rsi(closes, 14);
+  const m = macd(closes, 12, 26, 9);
+  const b = bb(closes, 20, 2);
+
+  // NEW
+  const atr14 = atr(highs, lows, closes, 14);
+  const kc    = keltner(highs, lows, closes, 20, 10, 2);
+  const chkv  = chaikinVolatility(highs, lows, 10, 10);
+  const dch   = donchian(highs, lows, 20);
+  const ps    = psar(highs, lows, 0.02, 0.2);
+
+  return {
+    closes, highs, lows,
+    ma50, ma200, ema10a, ema20a, ema12a, ema26a,
+    rsi: r, macd: m, bb: b,
+    atr14, kc, chkv, dch, ps
+  };
 }
 function scoreAt(i, ctx) {
   const { closes, ma50, ma200, rsi, macd: { macdLine, signalLine }, bb } = ctx;
   const price = closes[i]; if (!Number.isFinite(price)) return { score: 0, reasons: [] };
-  let trend = 0, mom = 0, mr = 0, vol = 0; const base = Math.max(price, 1e-6);
+  let trend = 0, mom = 0, mr = 0, vol = 0;
   const reasons = [];
 
   // Trend
   if (ma50[i] != null && ma200[i] != null) {
     const gap = ma50[i] - ma200[i];
-    trend += clamp(gap / (base * 0.02), -1, 1);
-    if (i >= 5 && ma50[i - 5] != null) trend += 0.3 * clamp((ma50[i] - ma50[i - 5]) / (base * 0.01), -1, 1);
+    trend += clamp(gap / Math.max(price * 0.02, 1e-6), -1, 1);
+    if (i >= 5 && ma50[i - 5] != null) trend += 0.3 * clamp((ma50[i] - ma50[i - 5]) / Math.max(price * 0.01, 1e-6), -1, 1);
     reasons.push(gap > 0 ? 'MA50 > MA200' : 'MA50 < MA200');
   }
   // Momentum
   if (macdLine[i] != null && signalLine[i] != null) {
     const md = macdLine[i] - signalLine[i];
-    mom += 0.7 * clamp(md / (base * 0.005), -1, 1);
+    mom += 0.7 * clamp(md / Math.max(price * 0.005, 1e-6), -1, 1);
     reasons.push(md > 0 ? 'MACD > Signal' : 'MACD < Signal');
   }
   if (rsi[i] != null) {
@@ -187,10 +338,11 @@ function scoreAt(i, ctx) {
     if (rsi[i] > 55) reasons.push('RSI>50');
     if (rsi[i] < 45) reasons.push('RSI<50');
   }
-  // Mean-reversion
+  // Mean reversion จาก BB
   if (bb.upper[i] != null && bb.lower[i] != null) {
-    if (price <= bb.lower[i]) { mr += 0.8; reasons.push('Touch Lower BB'); }
-    if (price >= bb.upper[i]) { mr -= 0.8; reasons.push('Touch Upper BB'); }
+    const priceNow = price;
+    if (priceNow <= bb.lower[i]) { mr += 0.8; reasons.push('Touch Lower BB'); }
+    if (priceNow >= bb.upper[i]) { mr -= 0.8; reasons.push('Touch Upper BB'); }
   }
   // Volatility hint
   if (macdLine[i] != null && signalLine[i] != null && bb.middle[i] != null) {
@@ -209,12 +361,18 @@ function computeTechnical(series) {
   const price = ctx.closes[i];
 
   const v = {
-    ma50: ctx.ma50[i], ma200: ctx.ma200[i],
-    ema10: ctx.ema10a[i], ema20: ctx.ema20a[i],
-    ema12: ctx.ema12a[i], ema26: ctx.ema26a[i],
-    rsi: ctx.rsi[i],
-    macd: ctx.macd.macdLine[i], macdSig: ctx.macd.signalLine[i],
-    bbUp: ctx.bb.upper[i], bbMd: ctx.bb.middle[i], bbLo: ctx.bb.lower[i],
+    // ชุดเดิม
+    SMA_50: ctx.ma50[i], SMA_200: ctx.ma200[i],
+    EMA_10: ctx.ema10a[i], EMA_20: ctx.ema20a[i],
+    MACD: ctx.macd.macdLine[i], MACD_Signal: ctx.macd.signalLine[i],
+    RSI: ctx.rsi[i],
+    Bollinger_High: ctx.bb.upper[i], Bollinger_Low: ctx.bb.lower[i], Bollinger_Middle: ctx.bb.middle[i],
+    // NEW
+    ATR: ctx.atr14[i],
+    Keltner_High: ctx.kc.upper[i], Keltner_Low: ctx.kc.lower[i], Keltner_Middle: ctx.kc.middle[i],
+    Chaikin_Vol: ctx.chkv[i],
+    Donchian_High: ctx.dch.upper[i], Donchian_Low: ctx.dch.lower[i],
+    PSAR: ctx.ps[i],
   };
 
   const { score, reasons } = scoreAt(i, ctx);
@@ -224,10 +382,10 @@ function computeTechnical(series) {
   else if (score <= SELL_TH) signal = 'SELL';
 
   const parts =
-    (v.ma50 != null && v.ma200 != null ? 1 : 0) +
-    (v.macd != null && v.macdSig != null ? 1 : 0) +
-    (v.rsi != null ? 1 : 0) +
-    (v.bbUp != null && v.bbLo != null ? 1 : 0);
+    (v.SMA_50 != null && v.SMA_200 != null ? 1 : 0) +
+    (v.MACD != null && v.MACD_Signal != null ? 1 : 0) +
+    (v.RSI != null ? 1 : 0) +
+    (v.Bollinger_High != null && v.Bollinger_Low != null ? 1 : 0);
   const coverage = parts / 4;
   const confidence = Math.round(100 * clamp(Math.abs(score) * (0.6 + 0.4 * coverage), 0, 1));
 
@@ -246,7 +404,6 @@ function backtestFull(fullSeries) {
 
   for (let t = 200; t < n - LOOKAHEAD; t++) {
     if ([ctx.ma200[t], ctx.macd.signalLine[t], ctx.rsi[t], ctx.bb.middle[t]].some(x => x == null)) continue;
-
     const { score } = scoreAt(t, ctx);
     if (prevScore == null) { prevScore = score; continue; }
 
@@ -295,8 +452,8 @@ export default function MarketTrendAnalysis() {
   const { search } = useLocation();
   const qs = useMemo(() => new URLSearchParams(search), [search]);
 
-  const qMarket = qs.get('market');   // 'Thailand'|'America'
-  const qSymbol = qs.get('symbol');   // e.g. 'PTT'
+  const qMarket = qs.get('market');
+  const qSymbol = qs.get('symbol');
   const qTf     = qs.get('timeframe') || DEFAULT_TF;
 
   const initCountry = MARKET_TO_COUNTRY[qMarket] || 'TH';
@@ -313,7 +470,7 @@ export default function MarketTrendAnalysis() {
 
   const market = COUNTRY_TO_MARKET[country];
 
-  // ดึงรายชื่อหุ้น
+  // รายชื่อหุ้น
   useEffect(() => {
     (async () => {
       try {
@@ -333,7 +490,7 @@ export default function MarketTrendAnalysis() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [country]);
 
-  // ดึงซีรีส์ข้อมูล
+  // ซีรีส์ข้อมูล
   useEffect(() => {
     if (!symbol) return;
     const controller = new AbortController();
@@ -357,7 +514,7 @@ export default function MarketTrendAnalysis() {
     return () => controller.abort();
   }, [symbol, tf]);
 
-  // window สำหรับคำนวณอินดี้ตาม timeframe
+  // หน้าต่างตาม timeframe
   const win = useMemo(() => {
     if (!series.length) return [];
     if (tf === 'ALL') return series;
@@ -365,13 +522,13 @@ export default function MarketTrendAnalysis() {
     return series.slice(-n);
   }, [series, tf]);
 
-  // คำนวณอินดี้ล่าสุดในหน้าต่าง
+  // คำนวณอินดี้ล่าสุด
   const tech = useMemo(() => computeTechnical(win), [win]);
 
-  // สถิติ timeframe (Return, Vol, MDD)
+  // สถิติ timeframe
   const tfStats = useMemo(() => {
     if (!win.length) return null;
-    const closes = win.map(d => Number(d.ClosePrice)).filter(Number.isFinite);
+    const closes = win.map(d => Number(takeNum(d, 'ClosePrice', 'Close', 'Adj Close', 'AdjClose'))).filter(Number.isFinite);
     if (!closes.length) return null;
     const ret = (closes.at(-1) - closes[0]) / closes[0];
     const rets = [];
@@ -381,11 +538,11 @@ export default function MarketTrendAnalysis() {
       }
     }
     const vol = stdev(rets);
-    const mdd = maxDrawdown(closes); // negative
+    const mdd = maxDrawdown(closes);
     return { bars: closes.length, returnPct: ret * 100, volPct: vol * 100, mddPct: mdd * 100 };
   }, [win]);
 
-  // backtest ซีรีส์เต็ม
+  // mini-backtest
   const bt = useMemo(() => backtestFull(series), [series]);
 
   return (
@@ -417,79 +574,106 @@ export default function MarketTrendAnalysis() {
 
         {tech ? (
           <>
-            {/* แถวอินดี้ 4 การ์ด */}
+            {/* กลุ่มหลัก (MA/EMA, RSI, MACD, BB) */}
             <Grid>
-              <Card color={tech.v.ma50 != null && tech.v.ma200 != null ? (tech.v.ma50 > tech.v.ma200 ? '#28a745' : '#dc3545') : '#6c757d'}>
-                <Title>Moving Averages (MA / EMA)</Title>
+              <Card color={tech.v.SMA_50 != null && tech.v.SMA_200 != null ? (tech.v.SMA_50 > tech.v.SMA_200 ? '#28a745' : '#dc3545') : '#6c757d'}>
+                <Title>Moving Averages (SMA/EMA)</Title>
                 <Val>
-                  MA50: {tech.v.ma50 != null ? tech.v.ma50.toFixed(2) : '-'}<br/>
-                  MA200: {tech.v.ma200 != null ? tech.v.ma200.toFixed(2) : '-'}<br/>
-                  EMA10: {tech.v.ema10 != null ? tech.v.ema10.toFixed(2) : '-'} &nbsp;|&nbsp;
-                  EMA20: {tech.v.ema20 != null ? tech.v.ema20.toFixed(2) : '-'}<br/>
-                  EMA12: {tech.v.ema12 != null ? tech.v.ema12.toFixed(2) : '-'} &nbsp;|&nbsp;
-                  EMA26: {tech.v.ema26 != null ? tech.v.ema26.toFixed(2) : '-'}
+                  SMA 50: {tech.v.SMA_50 != null ? tech.v.SMA_50.toFixed(2) : '-'}<br/>
+                  SMA 200: {tech.v.SMA_200 != null ? tech.v.SMA_200.toFixed(2) : '-'}<br/>
+                  EMA 10: {tech.v.EMA_10 != null ? tech.v.EMA_10.toFixed(2) : '-'} &nbsp;|&nbsp;
+                  EMA 20: {tech.v.EMA_20 != null ? tech.v.EMA_20.toFixed(2) : '-'}
                 </Val>
-                <SigText color={tech.v.ma50 != null && tech.v.ma200 != null ? (tech.v.ma50 > tech.v.ma200 ? '#28a745' : '#dc3545') : '#6c757d'}>
-                  {tech.v.ma50 != null && tech.v.ma200 != null
-                    ? (tech.v.ma50 > tech.v.ma200 ? 'Golden Cross (Uptrend Bias)' : 'Death Cross (Downtrend Bias)')
+                <SigText color={tech.v.SMA_50 != null && tech.v.SMA_200 != null ? (tech.v.SMA_50 > tech.v.SMA_200 ? '#28a745' : '#dc3545') : '#6c757d'}>
+                  {tech.v.SMA_50 != null && tech.v.SMA_200 != null
+                    ? (tech.v.SMA_50 > tech.v.SMA_200 ? 'Golden Cross (Uptrend Bias)' : 'Death Cross (Downtrend Bias)')
                     : 'Neutral'}
                 </SigText>
               </Card>
 
-              <Card color={tech.v.rsi != null ? (tech.v.rsi >= 70 ? '#dc3545' : tech.v.rsi > 50 ? '#28a745' : '#dc3545') : '#6c757d'}>
+              <Card color={tech.v.RSI != null ? (tech.v.RSI >= 70 ? '#dc3545' : tech.v.RSI > 50 ? '#28a745' : '#dc3545') : '#6c757d'}>
                 <Title>RSI (14)</Title>
-                <Val style={{fontSize:24}}>{tech.v.rsi != null ? tech.v.rsi.toFixed(2) : '-'}</Val>
-                <SigText color={tech.v.rsi != null ? (tech.v.rsi >= 70 ? '#dc3545' : tech.v.rsi > 50 ? '#28a745' : '#dc3545') : '#6c757d'}>
-                  {tech.v.rsi == null ? 'Neutral' :
-                    tech.v.rsi >= 70 ? 'Overbought' :
-                    tech.v.rsi <= 30 ? 'Oversold' :
-                    tech.v.rsi > 50 ? 'Bullish Momentum' : 'Bearish Momentum'}
+                <Val style={{fontSize:24}}>{tech.v.RSI != null ? tech.v.RSI.toFixed(2) : '-'}</Val>
+                <SigText color={tech.v.RSI != null ? (tech.v.RSI >= 70 ? '#dc3545' : tech.v.RSI > 50 ? '#28a745' : '#dc3545') : '#6c757d'}>
+                  {tech.v.RSI == null ? 'Neutral' :
+                    tech.v.RSI >= 70 ? 'Overbought' :
+                    tech.v.RSI <= 30 ? 'Oversold' :
+                    tech.v.RSI > 50 ? 'Bullish Momentum' : 'Bearish Momentum'}
                 </SigText>
               </Card>
 
-              <Card color={tech.v.macd != null && tech.v.macdSig != null ? (tech.v.macd > tech.v.macdSig ? '#28a745' : '#dc3545') : '#6c757d'}>
+              <Card color={tech.v.MACD != null && tech.v.MACD_Signal != null ? (tech.v.MACD > tech.v.MACD_Signal ? '#28a745' : '#dc3545') : '#6c757d'}>
                 <Title>MACD (12,26,9)</Title>
                 <Val>
-                  MACD: {tech.v.macd != null ? tech.v.macd.toFixed(4) : '-'}<br/>
-                  Signal: {tech.v.macdSig != null ? tech.v.macdSig.toFixed(4) : '-'}
+                  MACD: {tech.v.MACD != null ? tech.v.MACD.toFixed(4) : '-'}<br/>
+                  Signal: {tech.v.MACD_Signal != null ? tech.v.MACD_Signal.toFixed(4) : '-'}
                 </Val>
-                <SigText color={tech.v.macd != null && tech.v.macdSig != null ? (tech.v.macd > tech.v.macdSig ? '#28a745' : '#dc3545') : '#6c757d'}>
-                  {tech.v.macd != null && tech.v.macdSig != null
-                    ? (tech.v.macd > tech.v.macdSig ? 'Bullish Crossover' : 'Bearish Crossover')
+                <SigText color={tech.v.MACD != null && tech.v.MACD_Signal != null ? (tech.v.MACD > tech.v.MACD_Signal ? '#28a745' : '#dc3545') : '#6c757d'}>
+                  {tech.v.MACD != null && tech.v.MACD_Signal != null
+                    ? (tech.v.MACD > tech.v.MACD_Signal ? 'Bullish Crossover' : 'Bearish Crossover')
                     : 'Neutral'}
                 </SigText>
               </Card>
 
-              <Card color={tech.price != null && tech.v.bbUp != null && tech.v.bbLo != null ? (tech.price >= tech.v.bbUp ? '#dc3545' : tech.price <= tech.v.bbLo ? '#28a745' : '#6c757d') : '#6c757d'}>
+              <Card color={tech.price != null && tech.v.Bollinger_High != null && tech.v.Bollinger_Low != null ? (tech.price >= tech.v.Bollinger_High ? '#dc3545' : tech.price <= tech.v.Bollinger_Low ? '#28a745' : '#6c757d') : '#6c757d'}>
                 <Title>Bollinger Bands (20,2)</Title>
                 <Val>
-                  Upper: {tech.v.bbUp != null ? tech.v.bbUp.toFixed(2) : '-'}<br/>
-                  Middle: {tech.v.bbMd != null ? tech.v.bbMd.toFixed(2) : '-'}<br/>
-                  Lower: {tech.v.bbLo != null ? tech.v.bbLo.toFixed(2) : '-'}
+                  Upper: {tech.v.Bollinger_High != null ? tech.v.Bollinger_High.toFixed(2) : '-'}<br/>
+                  Middle: {tech.v.Bollinger_Middle != null ? tech.v.Bollinger_Middle.toFixed(2) : '-'}<br/>
+                  Lower: {tech.v.Bollinger_Low != null ? tech.v.Bollinger_Low.toFixed(2) : '-'}
                 </Val>
-                <SigText color={tech.price != null && tech.v.bbUp != null && tech.v.bbLo != null ? (tech.price >= tech.v.bbUp ? '#dc3545' : tech.price <= tech.v.bbLo ? '#28a745' : '#6c757d') : '#6c757d'}>
-                  {tech.price != null && tech.v.bbUp != null && tech.v.bbLo != null
-                    ? (tech.price >= tech.v.bbUp ? 'Price at/above Upper Band'
-                      : tech.price <= tech.v.bbLo ? 'Price at/below Lower Band'
+                <SigText color={tech.price != null && tech.v.Bollinger_High != null && tech.v.Bollinger_Low != null ? (tech.price >= tech.v.Bollinger_High ? '#dc3545' : tech.price <= tech.v.Bollinger_Low ? '#28a745' : '#6c757d') : '#6c757d'}>
+                  {tech.price != null && tech.v.Bollinger_High != null && tech.v.Bollinger_Low != null
+                    ? (tech.price >= tech.v.Bollinger_High ? 'Price at/above Upper Band'
+                      : tech.price <= tech.v.Bollinger_Low ? 'Price at/below Lower Band'
                       : 'Price near Middle Band')
                     : 'Price near Middle Band'}
                 </SigText>
               </Card>
             </Grid>
 
-            {/* Window Stats แยกเป็นบล็อกใหญ่ */}
-            <Grid style={{ marginTop: 20 }}>
-              <StatsCard color="#ff8c00">
-                <Title>Window Stats ({tf})</Title>
+            {/* Advanced Indicators */}
+            <H3 style={{marginTop:30}}>Advanced Indicators</H3>
+            <Grid>
+              <Card color="#ff8c00">
+                <Title>ATR (14)</Title>
+                <Val>ATR: {tech.v.ATR != null ? tech.v.ATR.toFixed(4) : '-'}</Val>
+                <SigText>Average True Range</SigText>
+              </Card>
+
+              <Card color="#20c997">
+                <Title>Keltner Channel</Title>
                 <Val>
-                  Bars: {tfStats?.bars ?? '-'}<br/>
-                  Return: {tfStats ? `${tfStats.returnPct.toFixed(2)}%` : '-'}<br/>
-                  Volatility (sd): {tfStats ? `${tfStats.volPct.toFixed(2)}%` : '-'}<br/>
-                  Max Drawdown: {tfStats ? `${tfStats.mddPct.toFixed(2)}%` : '-'}
+                  High: {tech.v.Keltner_High != null ? tech.v.Keltner_High.toFixed(2) : '-'}<br/>
+                  Middle: {tech.v.Keltner_Middle != null ? tech.v.Keltner_Middle.toFixed(2) : '-'}<br/>
+                  Low: {tech.v.Keltner_Low != null ? tech.v.Keltner_Low.toFixed(2) : '-'}
                 </Val>
-                <SigText>Calculated on last {win.length} bars</SigText>
-              </StatsCard>
+                <SigText>EMA(typical,20) ± 2 × ATR(10)</SigText>
+              </Card>
+
+              <Card color="#0dcaf0">
+                <Title>Chaikin Volatility</Title>
+                <Val>{tech.v.Chaikin_Vol != null ? `${tech.v.Chaikin_Vol.toFixed(2)}%` : '-'}</Val>
+                <SigText>ROC(10) of EMA(High−Low,10)</SigText>
+              </Card>
+
+              <Card color="#a78bfa">
+                <Title>Donchian Channel (20)</Title>
+                <Val>
+                  Upper: {tech.v.Donchian_High != null ? tech.v.Donchian_High.toFixed(2) : '-'}<br/>
+                  Lower: {tech.v.Donchian_Low != null ? tech.v.Donchian_Low.toFixed(2) : '-'}
+                </Val>
+                <SigText>20-bar Highest / Lowest</SigText>
+              </Card>
+
+              <Card color="#f97316">
+                <Title>Parabolic SAR</Title>
+                <Val>PSAR: {tech.v.PSAR != null ? tech.v.PSAR.toFixed(2) : '-'}</Val>
+                <SigText>step 0.02, max 0.2</SigText>
+              </Card>
             </Grid>
+
+          
 
             <H3 style={{marginTop:30}}>Strategy & Signals</H3>
             <Strat>

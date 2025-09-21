@@ -86,7 +86,8 @@ const AdminLayout = () => {
 
         <SidebarNavLink to="/dashboard" end>Overview</SidebarNavLink>
         <SidebarNavLink to="/manageuser">User Management</SidebarNavLink>
-        <SidebarNavLink to="/ai-trade-monitoring">AI Trade Monitoring</SidebarNavLink>
+        <SidebarNavLink to="/ai-trade-monitoring">AI Trade History</SidebarNavLink>
+        <SidebarNavLink to="/user-trade-history">User Trade History</SidebarNavLink>  {/* <-- เพิ่มบรรทัดนี้ */}
         <SidebarNavLink to="/model-performance-comparison">Model Performance Comparison</SidebarNavLink>
 
         {/* ✅ ใช้ path เดียวกับ navigate จากกราฟ */}

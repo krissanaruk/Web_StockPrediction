@@ -4,15 +4,18 @@ import styled from 'styled-components';
 import axios from 'axios';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Brush, Legend
+  ResponsiveContainer
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 
 /* ======================= CONFIG ======================= */
 const API_BASE = 'http://localhost:3000/api';
 const COUNTRY_TO_MARKET = { TH: 'Thailand', USA: 'America' };
-const DEFAULT_COUNTRY = 'TH';
-const DEFAULT_WINDOW = '1M';
+
+// ✅ เปิดมาที่ USA + ALL (symbol) เสมอ
+const DEFAULT_COUNTRY = 'USA';
+const DEFAULT_WINDOW = '1Y'; // ถ้าอยากเปิดมาเป็น ALL timeframe ให้เปลี่ยนเป็น 'ALL'
+
 const MAX_SERIES = 10;
 const WINDOWS = ['5D', '1M', '3M', '6M', '1Y', 'ALL'];
 
@@ -26,6 +29,8 @@ const getAuthHeaders = () => {
   return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
 };
 const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '—' : Number(v).toFixed(d));
+
+// รวมซีรีส์หลายตัวด้วย date เดียวกันให้อยู่ในแถวเดียว (สำหรับ Recharts)
 const mergeByDate = (seriesMap) => {
   const idx = new Map();
   Object.entries(seriesMap).forEach(([sym, arr]) => {
@@ -66,14 +71,12 @@ const Row = styled.div`
 const Sym = styled.span` font-weight:800; `;
 const Pct = styled.span` font-weight:800; `;
 
-/* Legend แบบกริดเรียบร้อย */
+/* Legend แบบกริด (อยู่นอกกราฟ) */
 const LegendWrap = styled.div`
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 10px 14px;
   padding-top: 8px;
-  max-height: 84px;          /* กันล้นชน Brush */
-  overflow: auto;
 `;
 const LegendItem = styled.div`
   display: inline-flex; align-items: center; gap: 8px;
@@ -95,7 +98,7 @@ export default function Dashboard() {
   // controls
   const [country, setCountry] = useState(DEFAULT_COUNTRY);
   const [symbols, setSymbols] = useState([]);
-  const [symbol, setSymbol] = useState('ALL');
+  const [symbol, setSymbol] = useState('ALL');   // ✅ คงค่า ALL เสมอเมื่อมีหุ้น > 1
   const [timeframe, setTimeframe] = useState(DEFAULT_WINDOW);
 
   // chart
@@ -112,41 +115,13 @@ export default function Dashboard() {
   const market = COUNTRY_TO_MARKET[country];
   const isAll = symbol === 'ALL';
 
-  /* ---------- nav helper ---------- */
   const goToTrend = (sym) => {
     if (!sym) return;
     const params = new URLSearchParams({ market, symbol: sym, timeframe });
     navigate(`/market-trend?${params.toString()}`);
   };
 
-  /* ---------- Legend (Grid + คลิกได้) ---------- */
-  const renderLegend = ({ payload }) => {
-    const items = (payload || [])
-      .map(e => ({ name: e.value, color: e.color }))
-      .filter((v, i, a) => a.findIndex(x => x.name === v.name) === i)
-      .sort((a, b) => a.name.localeCompare(b.name));
-
-    return (
-      <LegendWrap>
-        {items.map(({ name, color }) => (
-          <LegendItem
-            key={name}
-            onClick={() => goToTrend(name)}
-            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && goToTrend(name)}
-            role="button"
-            tabIndex={0}
-            title={name}
-            style={{ color }}
-          >
-            <LegendDot color={color} />
-            <LegendLabel>{name}</LegendLabel>
-          </LegendItem>
-        ))}
-      </LegendWrap>
-    );
-  };
-
-  /* ---------- loads ---------- */
+  /* ---------- โหลดรายการ symbol ตามประเทศ ---------- */
   useEffect(() => {
     (async () => {
       try {
@@ -156,6 +131,7 @@ export default function Dashboard() {
         );
         const list = (data?.data || []).map(r => ({ symbol: r.StockSymbol, name: r.CompanyName || r.StockSymbol }));
         setSymbols(list);
+        // ✅ ถ้ามีมากกว่า 1 ตัว ให้คง ALL, ถ้าน้อยกว่าหรือเท่ากับ 1 ให้เลือกตัวแรก
         setSymbol(list.length > 1 ? 'ALL' : (list[0]?.symbol || ''));
       } catch {
         setSymbols([]); setSymbol('ALL');
@@ -163,6 +139,7 @@ export default function Dashboard() {
     })();
   }, [country, market]);
 
+  /* ---------- โหลดกราฟ ---------- */
   useEffect(() => {
     if (!symbol) { setChartRows([]); return; }
     const controller = new AbortController();
@@ -174,15 +151,22 @@ export default function Dashboard() {
           const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
           return (data?.data || []).map(r => ({ date: r.date, ClosePrice: Number(r.ClosePrice) }));
         };
+
         if (isAll) {
+          // จำกัดจำนวนเส้นตาม MAX_SERIES (อยากได้มากกว่านี้เพิ่มค่าตัวแปรด้านบนได้)
           const pick = symbols.slice(0, MAX_SERIES).map(s => s.symbol);
           const settled = await Promise.allSettled(pick.map(sym => fetchOne(sym)));
           const seriesMap = {};
-          settled.forEach((r, i) => { if (r.status === 'fulfilled' && r.value.length) seriesMap[pick[i]] = r.value; });
+          settled.forEach((r, i) => {
+            if (r.status === 'fulfilled' && r.value.length) seriesMap[pick[i]] = r.value;
+          });
           setChartRows(mergeByDate(seriesMap));
         } else {
           const arr = await fetchOne(symbol);
-          setChartRows(arr.map(x => ({ date: new Date(x.date).toISOString().slice(0,10), [symbol]: x.ClosePrice })));
+          setChartRows(arr.map(x => ({
+            date: new Date(x.date).toISOString().slice(0, 10),
+            [symbol]: x.ClosePrice
+          })));
         }
       } catch (e) {
         if (e.name !== 'CanceledError') setErrChart('โหลดข้อมูลกราฟไม่สำเร็จ');
@@ -194,6 +178,7 @@ export default function Dashboard() {
     return () => controller.abort();
   }, [symbol, timeframe, symbols]);
 
+  /* ---------- โหลด Gainers/Losers ---------- */
   useEffect(() => {
     const controller = new AbortController();
     (async () => {
@@ -202,8 +187,8 @@ export default function Dashboard() {
         const url = `${API_BASE}/market-movers/range?market=${encodeURIComponent(market)}&timeframe=${encodeURIComponent(timeframe)}&limitSymbols=5000`;
         const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
         const rows = data?.data || [];
-        const g = rows.filter(r => (r.changePct ?? 0) > 0).sort((a,b)=> b.changePct - a.changePct);
-        const l = rows.filter(r => (r.changePct ?? 0) < 0).sort((a,b)=> a.changePct - b.changePct);
+        const g = rows.filter(r => (r.changePct ?? 0) > 0).sort((a, b) => b.changePct - a.changePct);
+        const l = rows.filter(r => (r.changePct ?? 0) < 0).sort((a, b) => a.changePct - b.changePct);
         setGainers(g); setLosers(l);
       } catch (e) {
         if (e.name !== 'CanceledError') setErrMovers('โหลด gainers/losers ไม่สำเร็จ');
@@ -215,9 +200,16 @@ export default function Dashboard() {
     return () => controller.abort();
   }, [market, timeframe]);
 
+  /* === สำคัญ: สร้างรายชื่อเส้นจากทุกแถว (ไม่ใช่แค่แถวแรก) เพื่อแก้บั๊ก 1Y เหลือ TRUE เดียว === */
   const lines = useMemo(() => {
     if (!chartRows.length) return [];
-    return Object.keys(chartRows[0]).filter(k => k !== 'date').slice(0, MAX_SERIES);
+    const set = new Set();
+    for (const row of chartRows) {
+      for (const k of Object.keys(row)) {
+        if (k !== 'date') set.add(k);
+      }
+    }
+    return Array.from(set).slice(0, MAX_SERIES);
   }, [chartRows]);
 
   return (
@@ -239,29 +231,29 @@ export default function Dashboard() {
           </Left>
           <Segments>
             {WINDOWS.map(tf => (
-              <button key={tf} className={tf===timeframe ? 'active' : ''} onClick={()=>setTimeframe(tf)}>{tf}</button>
+              <button key={tf} className={tf === timeframe ? 'active' : ''} onClick={() => setTimeframe(tf)}>{tf}</button>
             ))}
           </Segments>
         </HeaderRow>
 
-        {errChart && <div style={{color:'#ef4444', marginTop:6}}>{errChart}</div>}
-        {loadingChart && <div style={{color:'#a0a0a0', marginTop:6}}>Loading chart...</div>}
+        {errChart && <div style={{ color: '#ef4444', marginTop: 6 }}>{errChart}</div>}
+        {loadingChart && <div style={{ color: '#a0a0a0', marginTop: 6 }}>Loading chart...</div>}
 
-        <div style={{ height: 440, marginTop: 8 }}>
+        <div style={{ height: 420, marginTop: 8 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartRows} margin={{ top:8, right:16, left:0, bottom:24 }}>
+            <LineChart data={chartRows} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="date" tick={{ fill:'#c9c9c9' }} />
-              <YAxis tick={{ fill:'#c9c9c9' }} />
+              <XAxis dataKey="date" tick={{ fill: '#c9c9c9' }} />
+              <YAxis tick={{ fill: '#c9c9c9' }} />
               <Tooltip
-                formatter={(value, name)=> [fmt(value), name]}
-                labelFormatter={(l)=> `Date: ${l}`}
-                contentStyle={{ background:'#2a2a2a', border:'1px solid #444', color:'#eee' }}
+                formatter={(value, name) => [fmt(value), name]}
+                labelFormatter={(l) => `Date: ${l}`}
+                contentStyle={{ background: '#2a2a2a', border: '1px solid #444', color: '#eee' }}
+                wrapperStyle={{ zIndex: 20 }} // ให้ Tooltip ลอยบนสุด
               />
-              <Legend content={renderLegend} wrapperStyle={{ paddingTop: 6 }} />
 
               {/* เส้นจริง + activeDot คลิกได้ */}
-              {lines.map((k, idx)=> (
+              {lines.map((k, idx) => (
                 <Line
                   key={`vis-${k}`}
                   type="monotone"
@@ -271,12 +263,13 @@ export default function Dashboard() {
                   strokeWidth={2}
                   dot={false}
                   isAnimationActive={false}
-                  activeDot={{ r: 6, style:{ cursor:'pointer' }, onClick: () => goToTrend(k) }}
+                  connectNulls
+                  activeDot={{ r: 6, style: { cursor: 'pointer' }, onClick: () => goToTrend(k) }}
                 />
               ))}
 
               {/* เส้นโปร่งใสหนา (hitline) เพื่อให้คลิกง่ายทั้งแนวเส้น */}
-              {lines.map((k)=> (
+              {lines.map((k) => (
                 <Line
                   key={`hit-${k}`}
                   type="monotone"
@@ -285,41 +278,58 @@ export default function Dashboard() {
                   strokeWidth={16}
                   dot={false}
                   isAnimationActive={false}
+                  connectNulls
                   onClick={() => goToTrend(k)}
                   style={{ cursor: 'pointer' }}
                 />
               ))}
-
-              <Brush dataKey="date" height={26} travellerWidth={12} stroke="#666"
-                     startIndex={0} endIndex={Math.min(Math.max(chartRows.length-1,0), 40)} />
             </LineChart>
           </ResponsiveContainer>
+        </div>
+
+        {/* Legend แบบกริดอยู่นอกกราฟ (ไม่ชน UI ล่าง) */}
+        <div style={{ marginTop: 8 }}>
+          <LegendWrap>
+            {lines.map((name, i) => (
+              <LegendItem
+                key={name}
+                onClick={() => goToTrend(name)}
+                role="button"
+                tabIndex={0}
+                title={name}
+                style={{ color: COLORS[i % COLORS.length] }}
+              >
+                <LegendDot color={COLORS[i % COLORS.length]} />
+                <LegendLabel>{name}</LegendLabel>
+              </LegendItem>
+            ))}
+          </LegendWrap>
         </div>
       </Card>
 
       <TwoCol>
         <ListCard>
           <SubTitle>Gainers — {market} ({timeframe})</SubTitle>
-          {errMovers && <div style={{color:'#ef4444', marginTop:6}}>{errMovers}</div>}
-          {loadingMovers && <div style={{color:'#a0a0a0', marginTop:6}}>Loading...</div>}
-          {!loadingMovers && !gainers.length && <div style={{color:'#aaa', marginTop:8}}>No data</div>}
+          {errMovers && <div style={{ color: '#ef4444', marginTop: 6 }}>{errMovers}</div>}
+          {loadingMovers && <div style={{ color: '#a0a0a0', marginTop: 6 }}>Loading...</div>}
+          {!loadingMovers && !gainers.length && <div style={{ color: '#aaa', marginTop: 8 }}>No data</div>}
           {gainers.map(r => (
             <Row key={`G-${r.StockSymbol}`} onClick={() => goToTrend(r.StockSymbol)} title="Open in Market Trend">
               <Sym>{r.StockSymbol}</Sym>
-              <Pct style={{ color:'#22c55e' }}>{fmt(r.changePct,2)}%</Pct>
+              <Pct style={{ color: '#22c55e' }}>{fmt(r.changePct, 2)}%</Pct>
             </Row>
           ))}
         </ListCard>
 
         <ListCard>
           <SubTitle>Losers — {market} ({timeframe})</SubTitle>
-          {errMovers && <div style={{color:'#ef4444', marginTop:6}}>{errMovers}</div>}
-          {loadingMovers && <div style={{color:'#a0a0a0', marginTop:6}}>Loading...</div>}
-          {!loadingMovers && !losers.length && <div style={{color:'#aaa', marginTop:8}}>No data</div>}
+          {errMovers && <div style={{ color: '#ef4444', marginTop: 6 }}>{errMovers}</div>}
+          {loadingMovers && <div style={{ color: '#a0a0a0', marginTop: 6 }}>Loading...</div>}
+          {!loadingMovers && !losers.length && <div style={{ color: '#aaa', marginTop: 8 }}>No data</div>}
           {losers.map(r => (
             <Row key={`L-${r.StockSymbol}`} onClick={() => goToTrend(r.StockSymbol)} title="Open in Market Trend">
               <Sym>{r.StockSymbol}</Sym>
-              <Pct style={{ color:'#ef4444' }}>{fmt(r.changePct,2)}%</Pct>
+              <Pct style={{ color: '#ef4444' }}>{fmt(r.changePct, 2)}%</Pct>
             </Row>
           ))}
         </ListCard>

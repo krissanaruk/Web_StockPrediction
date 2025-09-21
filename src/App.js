@@ -4,6 +4,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-d
 import Login from "./pages/Login";
 import ManageUser from "./pages/ManageUser";
 import AITradeMonitor from "./pages/AITradeMonitor";
+import UserTradeHistory from "./pages/UserTradeHistory"; // เพิ่ม
 import ModelPerformanceComparison from "./pages/ModelPerformanceComparison";
 import MarketTrendAnalysis from "./pages/MarketTrendAnalysis";
 import Dashboard from "./pages/Dashboard";
@@ -26,6 +27,7 @@ function App() {
 
           <Route path="/model-performance-comparison" element={<ModelPerformanceComparison />} />
           <Route path="/ai-trade-monitoring" element={<AITradeMonitor />} />
+          <Route path="/user-trade-history" element={<UserTradeHistory />} /> {/* เพิ่ม */}
           <Route path="/manageuser" element={<ManageUser />} />
 
           {/* กันพิมพ์ผิด -> กลับ Dashboard */}
