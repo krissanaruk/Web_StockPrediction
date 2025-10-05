@@ -3,8 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 
@@ -12,9 +11,10 @@ import { useNavigate } from 'react-router-dom';
 const API_BASE = 'http://localhost:3000/api';
 const COUNTRY_TO_MARKET = { TH: 'Thailand', USA: 'America' };
 
-// ✅ เปิดมาที่ USA + ALL (symbol) เสมอ
+// เปิดมาที่ USA + 1Y + โหมดกลุ่มแบบ Industry เท่านั้น (ตัด Sector ออกทั้งหมด)
 const DEFAULT_COUNTRY = 'USA';
-const DEFAULT_WINDOW = '1Y'; // ถ้าอยากเปิดมาเป็น ALL timeframe ให้เปลี่ยนเป็น 'ALL'
+const DEFAULT_WINDOW = '1Y';
+const GROUP_BY_MODE = 'industry'; // 🔒 ใช้ industry อย่างเดียว
 
 const MAX_SERIES = 10;
 const WINDOWS = ['5D', '1M', '3M', '6M', '1Y', 'ALL'];
@@ -28,19 +28,28 @@ const getAuthHeaders = () => {
   const token = localStorage.getItem('adminToken');
   return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
 };
-const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '—' : Number(v).toFixed(d));
 
-// รวมซีรีส์หลายตัวด้วย date เดียวกันให้อยู่ในแถวเดียว (สำหรับ Recharts)
-const mergeByDate = (seriesMap) => {
-  const idx = new Map();
-  Object.entries(seriesMap).forEach(([sym, arr]) => {
-    arr.forEach(({ date, ClosePrice }) => {
-      const label = new Date(date).toISOString().slice(0, 10);
-      if (!idx.has(label)) idx.set(label, { date: label });
-      idx.get(label)[sym] = Number(ClosePrice);
+const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '—' : Number(v).toFixed(d));
+const fmtDate = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const da = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${da}`;
+};
+
+/* ===== helpers ===== */
+const combineByDateIndexValue = (seriesMap) => {
+  // สำหรับโหมด "กลุ่ม": arr item = {date, value}
+  const index = new Map();
+  Object.entries(seriesMap).forEach(([key, arr]) => {
+    arr.forEach(({ date, value }) => {
+      if (!index.has(date)) index.set(date, { date });
+      index.get(date)[key] = value;
     });
   });
-  return Array.from(idx.values()).sort((a, b) => new Date(a.date) - new Date(b.date));
+  return Array.from(index.values()).sort((a, b) => new Date(a.date) - new Date(b.date));
 };
 
 /* ======================= STYLED ======================= */
@@ -70,26 +79,18 @@ const Row = styled.div`
 `;
 const Sym = styled.span` font-weight:800; `;
 const Pct = styled.span` font-weight:800; `;
-
-/* Legend แบบกริด (อยู่นอกกราฟ) */
 const LegendWrap = styled.div`
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 10px 14px;
-  padding-top: 8px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px 14px; padding-top: 8px;
 `;
 const LegendItem = styled.div`
   display: inline-flex; align-items: center; gap: 8px;
-  cursor: pointer; font-weight: 800; user-select: none; outline: none;
-  &:hover { opacity: .9; text-decoration: underline; }
+  font-weight: 800; user-select: none; outline: none;
+  ${({ clickable }) => clickable ? 'cursor:pointer;&:hover{opacity:.9;text-decoration:underline;}' : 'opacity:.95;'}
 `;
-const LegendDot = styled.span`
-  display:inline-block; width:8px; height:8px; border-radius:50%;
-  background: ${p => p.color || '#999'};
-`;
-const LegendLabel = styled.span`
-  max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-`;
+const LegendDot = styled.span` display:inline-block; width:8px; height:8px; border-radius:50%; background: ${p => p.color || '#999'}; `;
+const LegendLabel = styled.span` max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; `;
+const Hint = styled.div` color:#9aa; font-size:12px; margin-top:6px; `;
 
 /* ======================= COMPONENT ======================= */
 export default function Dashboard() {
@@ -98,8 +99,11 @@ export default function Dashboard() {
   // controls
   const [country, setCountry] = useState(DEFAULT_COUNTRY);
   const [symbols, setSymbols] = useState([]);
-  const [symbol, setSymbol] = useState('ALL');   // ✅ คงค่า ALL เสมอเมื่อมีหุ้น > 1
+  const [symbol, setSymbol] = useState('ALL');      // 'ALL' = โหมดกลุ่ม
   const [timeframe, setTimeframe] = useState(DEFAULT_WINDOW);
+
+  // โหมดกลุ่ม (ALL)
+  const [groups, setGroups] = useState([]);         // [{key,label,count}]
 
   // chart
   const [chartRows, setChartRows] = useState([]);
@@ -116,7 +120,7 @@ export default function Dashboard() {
   const isAll = symbol === 'ALL';
 
   const goToTrend = (sym) => {
-    if (!sym) return;
+    if (!sym || isAll) return;
     const params = new URLSearchParams({ market, symbol: sym, timeframe });
     navigate(`/market-trend?${params.toString()}`);
   };
@@ -131,13 +135,29 @@ export default function Dashboard() {
         );
         const list = (data?.data || []).map(r => ({ symbol: r.StockSymbol, name: r.CompanyName || r.StockSymbol }));
         setSymbols(list);
-        // ✅ ถ้ามีมากกว่า 1 ตัว ให้คง ALL, ถ้าน้อยกว่าหรือเท่ากับ 1 ให้เลือกตัวแรก
         setSymbol(list.length > 1 ? 'ALL' : (list[0]?.symbol || ''));
       } catch {
         setSymbols([]); setSymbol('ALL');
       }
     })();
   }, [country, market]);
+
+  /* ---------- โหลดรายชื่อกลุ่ม (Industry-only) เมื่อโหมด ALL ---------- */
+  useEffect(() => {
+    if (!isAll) { setGroups([]); return; }
+    (async () => {
+      try {
+        const { data } = await axios.get(
+          `${API_BASE}/meta/groups?market=${encodeURIComponent(market)}&groupBy=${encodeURIComponent(GROUP_BY_MODE)}`,
+          getAuthHeaders()
+        );
+        const rows = data?.data || [];
+        setGroups(rows.slice(0, MAX_SERIES)); // เอาท็อป MAX_SERIES
+      } catch {
+        setGroups([]);
+      }
+    })();
+  }, [isAll, market]);
 
   /* ---------- โหลดกราฟ ---------- */
   useEffect(() => {
@@ -146,28 +166,39 @@ export default function Dashboard() {
     (async () => {
       try {
         setLoadingChart(true); setErrChart('');
-        const fetchOne = async (sym) => {
-          const url = `${API_BASE}/chart-data/${encodeURIComponent(sym)}?timeframe=${encodeURIComponent(timeframe)}`;
+
+        // 1) โหมดหุ้นรายตัว
+        if (!isAll) {
+          const url = `${API_BASE}/chart-data/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(timeframe)}`;
           const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
-          return (data?.data || []).map(r => ({ date: r.date, ClosePrice: Number(r.ClosePrice) }));
+          const rows = (data?.data || []).map(r => ({
+            date: r.date,
+            [symbol]: Number(r.ClosePrice)
+          }));
+          setChartRows(rows);
+          return;
+        }
+
+        // 2) โหมดกลุ่ม (ALL) -> group composite แบบ Equal-Weight (Indexed = 100)
+        if (!groups.length) { setChartRows([]); return; }
+
+        const fetchGroup = async (gkey) => {
+          const url = `${API_BASE}/benchmarks/group-composite?market=${encodeURIComponent(market)}&groupBy=${encodeURIComponent(GROUP_BY_MODE)}&key=${encodeURIComponent(gkey)}&timeframe=${encodeURIComponent(timeframe)}&method=equal`;
+          const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
+          return (data?.data || []).map(x => ({ date: x.date, value: Number(x.index) })); // index = normalized 100
         };
 
-        if (isAll) {
-          // จำกัดจำนวนเส้นตาม MAX_SERIES (อยากได้มากกว่านี้เพิ่มค่าตัวแปรด้านบนได้)
-          const pick = symbols.slice(0, MAX_SERIES).map(s => s.symbol);
-          const settled = await Promise.allSettled(pick.map(sym => fetchOne(sym)));
-          const seriesMap = {};
-          settled.forEach((r, i) => {
-            if (r.status === 'fulfilled' && r.value.length) seriesMap[pick[i]] = r.value;
-          });
-          setChartRows(mergeByDate(seriesMap));
-        } else {
-          const arr = await fetchOne(symbol);
-          setChartRows(arr.map(x => ({
-            date: new Date(x.date).toISOString().slice(0, 10),
-            [symbol]: x.ClosePrice
-          })));
-        }
+        const pick = groups.slice(0, MAX_SERIES).map(g => g.key);
+        const settled = await Promise.allSettled(pick.map(k => fetchGroup(k)));
+
+        const seriesMap = {};
+        settled.forEach((r, i) => {
+          const key = pick[i];
+          if (r.status === 'fulfilled' && r.value.length) seriesMap[key] = r.value;
+        });
+
+        const merged = combineByDateIndexValue(seriesMap);
+        setChartRows(merged);
       } catch (e) {
         if (e.name !== 'CanceledError') setErrChart('โหลดข้อมูลกราฟไม่สำเร็จ');
         setChartRows([]);
@@ -176,7 +207,7 @@ export default function Dashboard() {
       }
     })();
     return () => controller.abort();
-  }, [symbol, timeframe, symbols]);
+  }, [symbol, timeframe, isAll, market, groups]);
 
   /* ---------- โหลด Gainers/Losers ---------- */
   useEffect(() => {
@@ -200,7 +231,7 @@ export default function Dashboard() {
     return () => controller.abort();
   }, [market, timeframe]);
 
-  /* === สำคัญ: สร้างรายชื่อเส้นจากทุกแถว (ไม่ใช่แค่แถวแรก) เพื่อแก้บั๊ก 1Y เหลือ TRUE เดียว === */
+  /* สร้างรายชื่อเส้นจากทุกแถว */
   const lines = useMemo(() => {
     if (!chartRows.length) return [];
     const set = new Set();
@@ -219,16 +250,23 @@ export default function Dashboard() {
       <Card>
         <HeaderRow>
           <Left>
-            <SubTitle>Price — {market}</SubTitle>
+            <SubTitle>
+              {isAll ? `Price — ${market} (Indexed = 100)` : `Price — ${market}`}
+            </SubTitle>
+
             <Select value={country} onChange={e => setCountry(e.target.value)}>
               <option value="TH">Thailand (TH)</option>
               <option value="USA">United States (USA)</option>
             </Select>
+
+            {/* เลือกหุ้น/โหมด ALL */}
             <Select value={symbol} onChange={e => setSymbol(e.target.value)}>
-              {symbols.length > 1 && <option value="ALL">ALL</option>}
+              {symbols.length > 1 && <option value="ALL">ALL (Group)</option>}
               {symbols.map(s => <option key={s.symbol} value={s.symbol}>{s.symbol}</option>)}
             </Select>
+            {/* ✅ ไม่มีป้าย/ปุ่ม Industry แล้ว */}
           </Left>
+
           <Segments>
             {WINDOWS.map(tf => (
               <button key={tf} className={tf === timeframe ? 'active' : ''} onClick={() => setTimeframe(tf)}>{tf}</button>
@@ -236,6 +274,7 @@ export default function Dashboard() {
           </Segments>
         </HeaderRow>
 
+       
         {errChart && <div style={{ color: '#ef4444', marginTop: 6 }}>{errChart}</div>}
         {loadingChart && <div style={{ color: '#a0a0a0', marginTop: 6 }}>Loading chart...</div>}
 
@@ -243,16 +282,16 @@ export default function Dashboard() {
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartRows} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="date" tick={{ fill: '#c9c9c9' }} />
+              <XAxis dataKey="date" tick={{ fill: '#c9c9c9' }} tickFormatter={fmtDate} />
               <YAxis tick={{ fill: '#c9c9c9' }} />
               <Tooltip
                 formatter={(value, name) => [fmt(value), name]}
-                labelFormatter={(l) => `Date: ${l}`}
+                labelFormatter={(l) => `Date: ${fmtDate(l)}`}
                 contentStyle={{ background: '#2a2a2a', border: '1px solid #444', color: '#eee' }}
-                wrapperStyle={{ zIndex: 20 }} // ให้ Tooltip ลอยบนสุด
+                wrapperStyle={{ zIndex: 20 }}
               />
 
-              {/* เส้นจริง + activeDot คลิกได้ */}
+              {/* เส้นจริง — คลิกเส้นเพื่อไปหน้า Market Trend (เฉพาะโหมดหุ้นรายตัว) */}
               {lines.map((k, idx) => (
                 <Line
                   key={`vis-${k}`}
@@ -264,38 +303,26 @@ export default function Dashboard() {
                   dot={false}
                   isAnimationActive={false}
                   connectNulls
-                  activeDot={{ r: 6, style: { cursor: 'pointer' }, onClick: () => goToTrend(k) }}
-                />
-              ))}
-
-              {/* เส้นโปร่งใสหนา (hitline) เพื่อให้คลิกง่ายทั้งแนวเส้น */}
-              {lines.map((k) => (
-                <Line
-                  key={`hit-${k}`}
-                  type="monotone"
-                  dataKey={k}
-                  stroke="rgba(0,0,0,0)"
-                  strokeWidth={16}
-                  dot={false}
-                  isAnimationActive={false}
-                  connectNulls
-                  onClick={() => goToTrend(k)}
-                  style={{ cursor: 'pointer' }}
+                  onClick={() => { if (!isAll) goToTrend(k); }}
+                  style={{
+                    cursor: !isAll ? 'pointer' : 'default',
+                    // ให้คลิกถูกเส้นได้จริงบน path
+                    pointerEvents: !isAll ? 'visibleStroke' : 'none'
+                  }}
                 />
               ))}
             </LineChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Legend แบบกริดอยู่นอกกราฟ (ไม่ชน UI ล่าง) */}
+        {/* Legend แบบกริดอยู่นอกกราฟ (คลิกได้เฉพาะโหมดหุ้นรายตัว) */}
         <div style={{ marginTop: 8 }}>
           <LegendWrap>
             {lines.map((name, i) => (
               <LegendItem
                 key={name}
-                onClick={() => goToTrend(name)}
-                role="button"
-                tabIndex={0}
+                clickable={!isAll}
+                onClick={!isAll ? () => goToTrend(name) : undefined}
                 title={name}
                 style={{ color: COLORS[i % COLORS.length] }}
               >
