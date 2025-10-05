@@ -1,38 +1,63 @@
 // src/pages/MarketTrendAnalysis.js
+// MIXED MODE:
+// - LATEST SIGNAL = ซีรีส์เต็ม (GLOBAL)
+// - Core/Advanced = คำนวณจาก window ตาม timeframe (WINDOW)
+
 import React, { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
 import { useLocation } from 'react-router-dom';
 
 /* =========================================================================
-   1) CONFIG
+   1) THEME & CONFIG (โทนอ่านง่าย สื่อสัญญาณชัดเจน)
    ========================================================================= */
-const API_BASE = 'http://localhost:3000/api/market-trend';
+const THEME = {
+  background: '#0f0f0f',
+  surface: '#1e1e1e',
+  surfaceAlt: '#1b1b1b',
+  text: '#f1f1f1',
+  textMuted: '#9a9a9a',
+  border: '#2a2a2a',
+  borderAlt: '#333',
+  shadow: '0 5px 15px rgba(0,0,0,0.35)',
 
+  brand: '#ff8c00',   // ใช้เฉพาะหัวข้อ/เส้นคั่น
+  onBrand: '#ffffff',
+
+  bullish: '#00c46a', // เขียว (สัญญาณบวก)
+  bearish: '#ff4c4c', // แดง (สัญญาณลบ)
+  neutral: '#b0b0b0', // เทา (กลาง/ไม่ชัด)
+  value: '#ffcc66',   // สีตัวเลข
+
+  // พื้นหลังชิปแบบโปร่งเพื่ออ่านง่ายบนดาร์ค
+  chipBullBg: 'rgba(0,196,106,0.16)',
+  chipBearBg: 'rgba(255,76,76,0.16)',
+  chipNeutBg: 'rgba(176,176,176,0.16)',
+};
+
+// พื้นหลังไล่เฉดให้เหมือน LATEST SIGNAL
+const SIGNAL_BG = 'linear-gradient(45deg,#1b1b1b,#232323)';
+
+// ใช้สี "ตามสัญญาณ" (ไม่ใช้ส้มแบรนด์) เพื่อสอดคล้องทั้งหน้า
+const ACCENT_MODE = 'status';
+const accent = (statusColor) => (ACCENT_MODE === 'status' ? statusColor : THEME.brand);
+
+const API_BASE = 'http://localhost:3000/api/market-trend';
 const COUNTRY_TO_MARKET = { TH: 'Thailand', USA: 'America' };
 const MARKET_TO_COUNTRY = { Thailand: 'TH', America: 'USA' };
 const DEFAULT_SYMBOL_BY_COUNTRY = { TH: 'ADVANC', USA: 'AAPL' };
 
-/** Timeframe -> จำนวนแท่ง */
-const TF_LIMIT = {
+const TIMEFRAME_TO_LIMIT = { '1M': 22, '3M': 66, '6M': 132, '1Y': 252, 'ALL': 320 };
+const DEFAULT_TIMEFRAME = '1M';
 
-  '1M': 22,
-  '3M': 66,
-  '6M': 132,
-  '1Y': 252,
-  'ALL': 320,
-};
-const DEFAULT_TF = '1M';
-
-/** โหลดลึกพอสำหรับ MA200/MACD/BB/RSI และวอร์มอัป */
-const LOOKBACKS = [200, 26 + 9, 20, 14]; // MA200, MACD(12,26,9), BB20, RSI14
+const LOOKBACKS = [200, 26 + 9, 20, 14];
 const WARMUP = 30;
 const LOOKAHEAD = 5;
-const INDICATOR_MIN = Math.max(...LOOKBACKS) + WARMUP + LOOKAHEAD; // ~260
+const INDICATOR_MIN = Math.max(...LOOKBACKS) + WARMUP + LOOKAHEAD;
+const FORCE_MIN_BARS = 600;
 
-/** UI เงินตามตลาด */
 const CURRENCY_BY_MARKET = { Thailand: 'THB', America: 'USD' };
-const fmtMoney = (value, market) => {
+const formatMoneyByMarket = (value, market) => {
   if (value == null || !Number.isFinite(Number(value))) return 'N/A';
   const currency = CURRENCY_BY_MARKET[market] || 'USD';
   try {
@@ -41,7 +66,7 @@ const fmtMoney = (value, market) => {
     return `${currency === 'THB' ? '฿' : '$'}${Number(value).toFixed(2)}`;
   }
 };
-const auth = () => {
+const getAuthHeaders = () => {
   const token = localStorage.getItem('adminToken');
   return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
 };
@@ -49,31 +74,26 @@ const auth = () => {
 /* =========================================================================
    2) HELPERS
    ========================================================================= */
-const toNum = (v) => (v == null ? null : Number(v));
-const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-const sign = (x) => (x > 0 ? 1 : x < 0 ? -1 : 0);
-
-const takeNum = (row, ...keys) => {
-  for (const k of keys) {
-    if (row[k] != null && row[k] !== '') return Number(row[k]);
+const toNumberOrNull = (v) => {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') {
+    const n = Number(v.replace(/[, ]+/g, ''));
+    return Number.isFinite(n) ? n : null;
   }
   return null;
 };
-
-const stdev = (arr) => {
-  const v = arr.filter((x) => Number.isFinite(x));
-  if (!v.length) return 0;
-  const m = v.reduce((a, b) => a + b, 0) / v.length;
-  return Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / v.length);
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+const sign = (x) => (x > 0 ? 1 : x < 0 ? -1 : 0);
+const takeNumberFromRow = (row, ...keys) => {
+  for (const k of keys) if (row[k] != null && row[k] !== '') return toNumberOrNull(row[k]);
+  return null;
 };
-const maxDrawdown = (prices) => {
-  let peak = -Infinity, mdd = 0;
-  for (const p of prices) {
-    if (!Number.isFinite(p)) continue;
-    peak = Math.max(peak, p);
-    mdd = Math.min(mdd, (p - peak) / peak);
-  }
-  return mdd; // negative
+const standardDeviation = (arr) => {
+  const values = arr.filter(Number.isFinite);
+  if (!values.length) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  return Math.sqrt(values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length);
 };
 
 /* =========================================================================
@@ -100,8 +120,7 @@ const ema = (arr, period) => {
   for (let i = 0; i < arr.length; i++) {
     const v = Number.isFinite(arr[i]) ? arr[i] : null;
     if (v == null) { out[i] = prev; continue; }
-    if (prev == null) prev = v;
-    else prev = v * k + prev * (1 - k);
+    if (prev == null) prev = v; else prev = v * k + prev * (1 - k);
     out[i] = prev;
   }
   return out;
@@ -151,13 +170,11 @@ const bb = (arr, period = 20, k = 2) => {
     if (i < period - 1) continue;
     const win = arr.slice(i - period + 1, i + 1).filter(Number.isFinite);
     const m = mid[i]; if (!Number.isFinite(m)) continue;
-    const sd = stdev(win);
+    const sd = standardDeviation(win);
     up[i] = m + k * sd; lo[i] = m - k * sd;
   }
   return { upper: up, middle: mid, lower: lo };
 };
-
-/* ===== NEW: True Range & ATR (Wilder) ===== */
 const trueRange = (h, l, c) => {
   const n = Math.max(h.length, l.length, c.length);
   const tr = new Array(n).fill(null);
@@ -175,7 +192,6 @@ const atr = (h, l, c, period = 14) => {
   const tr = trueRange(h, l, c);
   if (!tr.length) return [];
   const out = new Array(tr.length).fill(null);
-  // initial ATR = average of first 'period' TR values after skipping nulls
   let acc = 0, cnt = 0, start = -1;
   for (let i = 0; i < tr.length; i++) {
     if (tr[i] == null) continue;
@@ -185,12 +201,10 @@ const atr = (h, l, c, period = 14) => {
   if (start < 0) return out;
   for (let i = start + 1; i < tr.length; i++) {
     if (tr[i] == null || out[i - 1] == null) { out[i] = out[i - 1]; continue; }
-    out[i] = (out[i - 1] * (period - 1) + tr[i]) / period; // Wilder's smoothing
+    out[i] = (out[i - 1] * (period - 1) + tr[i]) / period;
   }
   return out;
 };
-
-/* ===== NEW: Keltner Channel (EMA(typical,20) ± 2*ATR(10)) ===== */
 const keltner = (h, l, c, emaP = 20, atrP = 10, mult = 2) => {
   const typical = h.map((_, i) => {
     const hi = h[i], lo = l[i], cl = c[i];
@@ -202,8 +216,6 @@ const keltner = (h, l, c, emaP = 20, atrP = 10, mult = 2) => {
   const lo = mid.map((m, i) => (m != null && a10[i] != null) ? m - mult * a10[i] : null);
   return { upper: up, middle: mid, lower: lo };
 };
-
-/* ===== NEW: Chaikin Volatility (EMA(H-L,n) ROC over k) ===== */
 const chaikinVolatility = (h, l, n = 10, k = 10) => {
   const hl = h.map((_, i) => (Number.isFinite(h[i]) && Number.isFinite(l[i])) ? (h[i] - l[i]) : null);
   const smooth = ema(hl, n);
@@ -212,14 +224,10 @@ const chaikinVolatility = (h, l, n = 10, k = 10) => {
     const prev = smooth[i - k];
     if (smooth[i] != null && prev != null && prev !== 0) {
       out[i] = ((smooth[i] - prev) / prev) * 100;
-    } else {
-      out[i] = null;
-    }
+    } else out[i] = null;
   }
   return out;
 };
-
-/* ===== NEW: Donchian Channel (period) ===== */
 const donchian = (h, l, period = 20) => {
   const up = new Array(h.length).fill(null);
   const lo = new Array(h.length).fill(null);
@@ -235,51 +243,29 @@ const donchian = (h, l, period = 20) => {
   }
   return { upper: up, lower: lo };
 };
-
-/* ===== NEW: PSAR (Parabolic SAR) ===== */
 const psar = (h, l, step = 0.02, maxStep = 0.2) => {
   const n = Math.max(h.length, l.length);
   if (n === 0) return [];
   const out = new Array(n).fill(null);
-  let isUp = true;
-  let af = step;
-  let ep = h[0]; // extreme point
-  let sar = l[0];
-
-  // bootstrap second bar
+  let isUp = true, af = step, ep = h[0], sar = l[0];
   if (Number.isFinite(h[1]) && Number.isFinite(l[1])) {
     isUp = h[1] >= h[0];
     ep = isUp ? Math.max(h[0], h[1]) : Math.min(l[0], l[1]);
     sar = isUp ? Math.min(l[0], l[1]) : Math.max(h[0], h[1]);
     out[1] = sar;
   }
-
   for (let i = 2; i < n; i++) {
     if (!Number.isFinite(h[i]) || !Number.isFinite(l[i])) { out[i] = out[i - 1]; continue; }
-
     sar = sar + af * (ep - sar);
-
-    // ในขาขึ้น SAR ห้ามสูงกว่า low ของสองแท่งก่อนหน้า
     if (isUp) {
       sar = Math.min(sar, l[i - 1], l[i - 2] ?? l[i - 1]);
       if (h[i] > ep) { ep = h[i]; af = Math.min(af + step, maxStep); }
-      if (l[i] < sar) { // reverse
-        isUp = false;
-        sar = ep;
-        ep = l[i];
-        af = step;
-      }
-    } else { // ขาลง SAR ห้ามต่ำกว่า high ของสองแท่งก่อนหน้า
+      if (l[i] < sar) { isUp = false; sar = ep; ep = l[i]; af = step; }
+    } else {
       sar = Math.max(sar, h[i - 1], h[i - 2] ?? h[i - 1]);
       if (l[i] < ep) { ep = l[i]; af = Math.min(af + step, maxStep); }
-      if (h[i] > sar) { // reverse
-        isUp = true;
-        sar = ep;
-        ep = h[i];
-        af = step;
-      }
+      if (h[i] > sar) { isUp = true; sar = ep; ep = h[i]; af = step; }
     }
-
     out[i] = sar;
   }
   return out;
@@ -288,86 +274,92 @@ const psar = (h, l, step = 0.02, maxStep = 0.2) => {
 /* =========================================================================
    4) CORE CALC (คะแนน+สัญญาณ)
    ========================================================================= */
-function buildCtx(series) {
-  // รองรับชื่อคอลัมน์ High/Low หลายแบบ
-  const closes = series.map((d) => takeNum(d, 'ClosePrice', 'Close', 'Adj Close', 'AdjClose'));
-  const highs  = series.map((d) => takeNum(d, 'HighPrice', 'High'));
-  const lows   = series.map((d) => takeNum(d, 'LowPrice', 'Low'));
+function buildContextFromSeries(series) {
+  const closes = series.map((d) =>
+    takeNumberFromRow(d, 'ClosePrice', 'Close', 'Adj Close', 'AdjClose', 'close', 'C')
+  );
+  const highs  = series.map((d) => takeNumberFromRow(d, 'HighPrice', 'High', 'high', 'H'));
+  const lows   = series.map((d) => takeNumberFromRow(d, 'LowPrice', 'Low', 'low', 'L'));
 
   const ma50 = sma(closes, 50), ma200 = sma(closes, 200);
-  const ema10a = ema(closes, 10), ema20a = ema(closes, 20), ema12a = ema(closes, 12), ema26a = ema(closes, 26);
-  const r = rsi(closes, 14);
-  const m = macd(closes, 12, 26, 9);
-  const b = bb(closes, 20, 2);
+  const ema10a = ema(closes, 10), ema20a = ema(closes, 20);
+  const rsiValues = rsi(closes, 14);
+  const macdValues = macd(closes, 12, 26, 9);
+  const bollinger = bb(closes, 20, 2);
 
-  // NEW
   const atr14 = atr(highs, lows, closes, 14);
-  const kc    = keltner(highs, lows, closes, 20, 10, 2);
-  const chkv  = chaikinVolatility(highs, lows, 10, 10);
-  const dch   = donchian(highs, lows, 20);
-  const ps    = psar(highs, lows, 0.02, 0.2);
+  const keltner20 = keltner(highs, lows, closes, 20, 10, 2);
+  const chaikinVol = chaikinVolatility(highs, lows, 10, 10);
+  const donchian20 = donchian(highs, lows, 20);
+  const psarVal = psar(highs, lows, 0.02, 0.2);
 
   return {
     closes, highs, lows,
-    ma50, ma200, ema10a, ema20a, ema12a, ema26a,
-    rsi: r, macd: m, bb: b,
-    atr14, kc, chkv, dch, ps
+    ma50, ma200, ema10a, ema20a,
+    rsi: rsiValues, macd: macdValues, bb: bollinger,
+    atr14, kc: keltner20, chkv: chaikinVol, dch: donchian20, ps: psarVal
   };
 }
-function scoreAt(i, ctx) {
+function scoreAt(index, ctx) {
   const { closes, ma50, ma200, rsi, macd: { macdLine, signalLine }, bb } = ctx;
-  const price = closes[i]; if (!Number.isFinite(price)) return { score: 0, reasons: [] };
-  let trend = 0, mom = 0, mr = 0, vol = 0;
+  const price = closes[index];
+  if (!Number.isFinite(price)) return { score: 0, reasons: ['ราคา: ข้อมูลไม่พอ'] };
+
+  let trend = 0, momentum = 0, meanReversion = 0, volBias = 0;
   const reasons = [];
 
-  // Trend
-  if (ma50[i] != null && ma200[i] != null) {
-    const gap = ma50[i] - ma200[i];
+  if (ma50[index] != null && ma200[index] != null) {
+    const gap = ma50[index] - ma200[index];
     trend += clamp(gap / Math.max(price * 0.02, 1e-6), -1, 1);
-    if (i >= 5 && ma50[i - 5] != null) trend += 0.3 * clamp((ma50[i] - ma50[i - 5]) / Math.max(price * 0.01, 1e-6), -1, 1);
-    reasons.push(gap > 0 ? 'MA50 > MA200' : 'MA50 < MA200');
-  }
-  // Momentum
-  if (macdLine[i] != null && signalLine[i] != null) {
-    const md = macdLine[i] - signalLine[i];
-    mom += 0.7 * clamp(md / Math.max(price * 0.005, 1e-6), -1, 1);
-    reasons.push(md > 0 ? 'MACD > Signal' : 'MACD < Signal');
-  }
-  if (rsi[i] != null) {
-    mom += 0.3 * clamp((rsi[i] - 50) / 50, -1, 1);
-    if (rsi[i] > 55) reasons.push('RSI>50');
-    if (rsi[i] < 45) reasons.push('RSI<50');
-  }
-  // Mean reversion จาก BB
-  if (bb.upper[i] != null && bb.lower[i] != null) {
-    const priceNow = price;
-    if (priceNow <= bb.lower[i]) { mr += 0.8; reasons.push('Touch Lower BB'); }
-    if (priceNow >= bb.upper[i]) { mr -= 0.8; reasons.push('Touch Upper BB'); }
-  }
-  // Volatility hint
-  if (macdLine[i] != null && signalLine[i] != null && bb.middle[i] != null) {
-    const md = macdLine[i] - signalLine[i];
-    vol += 0.1 * sign(md);
+    if (index >= 5 && ma50[index - 5] != null) {
+      trend += 0.3 * clamp((ma50[index] - ma50[index - 5]) / Math.max(price * 0.01, 1e-6), -1, 1);
+    }
+    const gapPct = Math.abs(ma200[index]) ? ((gap / ma200[index]) * 100) : 0;
+    reasons.push(gapPct < 0.3 ? 'MA50 ≈ MA200' : (gap > 0 ? 'MA50 > MA200' : 'MA50 < MA200'));
+  } else reasons.push('MA50/MA200: ข้อมูลไม่พอ');
+
+  if (macdLine[index] != null && signalLine[index] != null) {
+    const md = macdLine[index] - signalLine[index];
+    momentum += 0.7 * clamp(md / Math.max(price * 0.005, 1e-6), -1, 1);
+    reasons.push(Math.abs(md) < 1e-4 ? 'MACD ≈ Signal' : (md > 0 ? 'MACD > Signal' : 'MACD < Signal'));
+  } else reasons.push('MACD/Signal: ข้อมูลไม่พอ');
+
+  if (rsi[index] != null) {
+    momentum += 0.3 * clamp((rsi[index] - 50) / 50, -1, 1);
+    reasons.push(
+      rsi[index] >= 70 ? 'RSI ≥ 70 (Overbought)' :
+      rsi[index] <= 30 ? 'RSI ≤ 30 (Oversold)' :
+      rsi[index] > 50  ? 'RSI > 50' :
+      rsi[index] < 50  ? 'RSI < 50' : 'RSI ≈ 50'
+    );
+  } else reasons.push('RSI: ข้อมูลไม่พอ');
+
+  if (bb.upper[index] != null && bb.lower[index] != null) {
+    if (price <= bb.lower[index]) { meanReversion += 0.8; reasons.push('Touch Lower BB'); }
+    else if (price >= bb.upper[index]) { meanReversion -= 0.8; reasons.push('Touch Upper BB'); }
+    else reasons.push('Inside Bands');
+  } else reasons.push('Bollinger: ข้อมูลไม่พอ');
+
+  if (macdLine[index] != null && signalLine[index] != null && bb.middle[index] != null) {
+    const md = macdLine[index] - signalLine[index];
+    volBias += 0.1 * sign(md);
   }
 
-  const W_T = 0.4, W_M = 0.3, W_R = 0.2, W_V = 0.1;
-  const score = W_T * clamp(trend, -1, 1) + W_M * clamp(mom, -1, 1) + W_R * clamp(mr, -1, 1) + W_V * clamp(vol, -1, 1);
+  const score = 0.4*clamp(trend,-1,1) + 0.3*clamp(momentum,-1,1) + 0.2*clamp(meanReversion,-1,1) + 0.1*clamp(volBias,-1,1);
   return { score, reasons };
 }
 function computeTechnical(series) {
   if (!series?.length) return null;
-  const ctx = buildCtx(series);
+  const ctx = buildContextFromSeries(series);
   const i = ctx.closes.length - 1;
   const price = ctx.closes[i];
 
   const v = {
-    // ชุดเดิม
     SMA_50: ctx.ma50[i], SMA_200: ctx.ma200[i],
     EMA_10: ctx.ema10a[i], EMA_20: ctx.ema20a[i],
     MACD: ctx.macd.macdLine[i], MACD_Signal: ctx.macd.signalLine[i],
     RSI: ctx.rsi[i],
     Bollinger_High: ctx.bb.upper[i], Bollinger_Low: ctx.bb.lower[i], Bollinger_Middle: ctx.bb.middle[i],
-    // NEW
     ATR: ctx.atr14[i],
     Keltner_High: ctx.kc.upper[i], Keltner_Low: ctx.kc.lower[i], Keltner_Middle: ctx.kc.middle[i],
     Chaikin_Vol: ctx.chkv[i],
@@ -381,6 +373,7 @@ function computeTechnical(series) {
   if (score >= BUY_TH) signal = 'BUY';
   else if (score <= SELL_TH) signal = 'SELL';
 
+  // confidence คำนวณไว้แต่ "ไม่แสดงผล" ตามที่ขอ
   const parts =
     (v.SMA_50 != null && v.SMA_200 != null ? 1 : 0) +
     (v.MACD != null && v.MACD_Signal != null ? 1 : 0) +
@@ -389,60 +382,90 @@ function computeTechnical(series) {
   const coverage = parts / 4;
   const confidence = Math.round(100 * clamp(Math.abs(score) * (0.6 + 0.4 * coverage), 0, 1));
 
-  return { ctx, price, v, score, signal, confidence, reasons };
-}
-function backtestFull(fullSeries) {
-  if (!fullSeries?.length || fullSeries.length < INDICATOR_MIN) {
-    return { effectiveness: 0, hits: 0, total: 0, lookahead: LOOKAHEAD };
-  }
-  const ctx = buildCtx(fullSeries);
-  const n = ctx.closes.length;
-  const BUY_TH = 0.20, SELL_TH = -0.20;
-
-  let total = 0, hits = 0;
-  let prevScore = null, lastSide = 'FLAT';
-
-  for (let t = 200; t < n - LOOKAHEAD; t++) {
-    if ([ctx.ma200[t], ctx.macd.signalLine[t], ctx.rsi[t], ctx.bb.middle[t]].some(x => x == null)) continue;
-    const { score } = scoreAt(t, ctx);
-    if (prevScore == null) { prevScore = score; continue; }
-
-    let sig = 'HOLD';
-    if (prevScore < BUY_TH && score >= BUY_TH) sig = 'BUY';
-    else if (prevScore > SELL_TH && score <= SELL_TH) sig = 'SELL';
-    prevScore = score;
-
-    if (sig === 'HOLD' || sig === lastSide) continue;
-    lastSide = sig;
-
-    const pv = ctx.closes[t], fv = ctx.closes[t + LOOKAHEAD];
-    if (!Number.isFinite(pv) || !Number.isFinite(fv)) continue;
-    const ok = sig === 'BUY' ? fv > pv : fv < pv;
-    total++; if (ok) hits++;
-  }
-  const eff = total ? Math.round((hits / total) * 100) : 0;
-  return { effectiveness: eff, hits, total, lookahead: LOOKAHEAD };
+  return { ctx, price, indicators: v, score, signal, confidence, reasons };
 }
 
 /* =========================================================================
    5) UI STYLES
    ========================================================================= */
-const Main = styled.div`flex:1; display:flex; flex-direction:column; align-items:center; padding:20px; color:#e0e0e0;`;
-const Header = styled.header`width:100%; background:#ff8c00; color:#fff; padding:15px; border-radius:10px; font-size:28px; font-weight:700; text-align:center; margin-bottom:20px;`;
-const Box = styled.div`background:#1e1e1e; border:1px solid #333; border-radius:12px; box-shadow:0 5px 15px rgba(0,0,0,.3); padding:25px; width:100%; max-width:1400px;`;
-const H3 = styled.h3`color:#ff8c00; border-bottom:2px solid #ff8c00; padding-bottom:10px; margin:0 0 20px 0; font-size:22px;`;
-const Row = styled.div`display:flex; gap:15px; flex-wrap:wrap; margin-bottom:16px; align-items:center;`;
-const Select = styled.select`background:#333; color:#fff; border:1px solid rgba(255,255,255,.3); border-radius:8px; padding:10px; font-weight:700;`;
-const Grid = styled.div`display:grid; grid-template-columns:repeat(auto-fit, minmax(280px,1fr)); gap:20px;`;
-const Card = styled.div`background:#2a2a2a; border-left:5px solid ${p=>p.color||'#ff8c00'}; border-radius:10px; padding:18px;`;
-const Title = styled.h4`margin:0 0 8px 0; color:#e0e0e0;`;
-const Val = styled.p`margin:0; color:#ffbd66; font-weight:700; line-height:1.6;`;
-const SigText = styled.p`margin:6px 0 0 0; font-weight:700; color:${p=>p.color||'#a0a0a0'};`;
-const Strat = styled.div`background:linear-gradient(45deg,#2a2a2a,#333); border-radius:12px; padding:20px; display:flex; gap:20px; flex-wrap:wrap; justify-content:space-between;`;
-const Big = styled.p`font-size:48px; font-weight:800; margin:8px 0 0 0; color:${p=>p.s==='BUY'?'#28a745':p.s==='SELL'?'#dc3545':'#6c757d'};`;
-const StatsCard = styled(Card)`
-  grid-column: span 2;
-  @media (max-width: 1100px) { grid-column: span 1; }
+const Main = styled.div`
+  flex:1; display:flex; flex-direction:column; align-items:center; padding:20px; color:${THEME.text};
+  background:${THEME.background};
+`;
+const Header = styled.header`
+  width:100%; background:${THEME.brand}; color:${THEME.onBrand}; padding:15px; text-align:center;
+  font-size:28px; font-weight:bold; box-shadow:0 4px 8px rgba(255,140,0,0.4);
+  border-radius:10px; margin-bottom:20px;
+`;
+const Box = styled.div`
+  background:${THEME.surface}; padding:20px; border-radius:10px; width:100%;
+  max-width:1400px; box-shadow:${THEME.shadow}; border:1px solid ${THEME.border};
+`;
+const TopSection = styled.div`
+  background:${SIGNAL_BG};
+  border:1px solid ${THEME.borderAlt};
+  border-radius:12px;
+  padding:16px;
+  margin-bottom:16px;
+`;
+const H3 = styled.h3`
+  color:${THEME.brand}; border-bottom:2px solid ${THEME.brand}; padding-bottom:10px; margin:0 0 16px 0;
+  font-size:20px; letter-spacing:.2px;
+`;
+const Row = styled.div`display:flex; gap:12px; flex-wrap:wrap; align-items:center;`;
+const Label = styled.span`font-weight:700; color:${THEME.textMuted}; font-size:13px;`;
+const Select = styled.select`
+  background:#1f1f1f; color:#fff; border:1px solid #3a3a3a; border-radius:10px; padding:10px 12px; font-weight:700;
+`;
+const Grid = styled.div`display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:16px;`;
+
+// การ์ด Core/Advanced ใช้พื้นหลังไล่เฉดเดียวกับ LATEST SIGNAL
+const Card = styled.div`
+  background:${SIGNAL_BG};
+  border:1px solid ${THEME.borderAlt};
+  border-left:5px solid ${p=>p.color||THEME.brand};
+  border-radius:12px;
+  padding:16px;
+`;
+const Title = styled.h4`margin:0 0 10px 0; color:${THEME.text}; font-size:16px;`;
+const Val = styled.p`margin:0; color:${THEME.value}; font-weight:700; line-height:1.6;`;
+const SigText = styled.p`margin:8px 0 0 0; font-weight:700; color:${p=>p.color||THEME.textMuted};`;
+
+const Toggle = styled.button`
+  margin:12px 0 0 0; background:#262626; color:${THEME.text}; border:1px solid #3a3a3a;
+  padding:10px 12px; border-radius:10px; font-weight:700; cursor:pointer;
+  &:hover{background:#2c2c2c;}
+`;
+
+// LATEST SIGNAL
+const SignalWrap = styled.div`
+  display:flex; flex-direction:column; gap:12px;
+  background:${SIGNAL_BG};
+  border-radius:12px; padding:18px; border:1px solid ${THEME.borderAlt};
+`;
+const SignalMainRow = styled.div`
+  display:flex; align-items:baseline; justify-content:space-between;
+  gap:12px; margin-top:4px;
+`;
+const PriceBadge = styled.div`
+  display:inline-flex; align-items:center; gap:8px;
+  padding:6px 12px; border-radius:999px;
+  background:#202020; border:1px solid #343434;
+`;
+const PriceLabel = styled.span`font-size:12px; color:${THEME.textMuted};`;
+const PriceValue = styled.span`font-weight:800; color:${THEME.value};`;
+
+const BigSignal = styled.p`
+  font-size:42px; font-weight:900; margin:2px 0 4px 0;
+  color: ${p => (p.s === 'BUY' ? THEME.bullish : (p.s === 'SELL' ? THEME.bearish : THEME.neutral))};
+`;
+
+const ChipRow = styled.div`display:flex; flex-wrap:wrap; gap:8px;`;
+const Chip = styled.span`
+  padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700;
+  background:${p=>p.type==='bull'?THEME.chipBullBg:p.type==='bear'?THEME.chipBearBg:THEME.chipNeutBg};
+  color:${p=>p.type==='bull'?THEME.bullish:p.type==='bear'?THEME.bearish:THEME.textMuted};
+  border:1px solid ${p=>p.type==='bull'?THEME.bullish:p.type==='bear'?THEME.bearish:THEME.borderAlt};
 `;
 
 /* =========================================================================
@@ -450,23 +473,24 @@ const StatsCard = styled(Card)`
    ========================================================================= */
 export default function MarketTrendAnalysis() {
   const { search } = useLocation();
-  const qs = useMemo(() => new URLSearchParams(search), [search]);
+  const queryParams = useMemo(() => new URLSearchParams(search), [search]);
 
-  const qMarket = qs.get('market');
-  const qSymbol = qs.get('symbol');
-  const qTf     = qs.get('timeframe') || DEFAULT_TF;
+  const queryMarket = queryParams.get('market');
+  const querySymbol = queryParams.get('symbol');
+  const queryTimeframe = queryParams.get('timeframe') || DEFAULT_TIMEFRAME;
 
-  const initCountry = MARKET_TO_COUNTRY[qMarket] || 'TH';
-  const initSymbol  = qSymbol || DEFAULT_SYMBOL_BY_COUNTRY[initCountry];
+  const initialCountry = MARKET_TO_COUNTRY[queryMarket] || 'TH';
+  const initialSymbol  = querySymbol || DEFAULT_SYMBOL_BY_COUNTRY[initialCountry];
 
-  const [country, setCountry] = useState(initCountry);
-  const [symbol, setSymbol] = useState(initSymbol);
-  const [tf, setTf] = useState(qTf);
+  const [country, setCountry] = useState(initialCountry);
+  const [stockSymbol, setStockSymbol] = useState(initialSymbol);
+  const [timeframe, setTimeframe] = useState(queryTimeframe);
 
-  const [symbols, setSymbols] = useState([]);
+  const [symbolList, setSymbolList] = useState([]);
   const [series, setSeries] = useState([]);
-  const [err, setErr] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [errorText, setErrorText] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(true);
 
   const market = COUNTRY_TO_MARKET[country];
 
@@ -474,228 +498,307 @@ export default function MarketTrendAnalysis() {
   useEffect(() => {
     (async () => {
       try {
-        setErr('');
-        const { data } = await axios.get(`${API_BASE}/symbols?market=${encodeURIComponent(market)}`, auth());
+        setErrorText('');
+        const { data } = await axios.get(`${API_BASE}/symbols?market=${encodeURIComponent(market)}`, getAuthHeaders());
         const list = (data?.data || []).map(r => ({ symbol: r.StockSymbol, name: r.CompanyName || r.StockSymbol }));
-        setSymbols(list);
-        if (!list.some(x => x.symbol === symbol)) {
-          setSymbol(DEFAULT_SYMBOL_BY_COUNTRY[country] || list[0]?.symbol || '');
+        setSymbolList(list);
+        if (!list.some(x => x.symbol === stockSymbol)) {
+          setStockSymbol(DEFAULT_SYMBOL_BY_COUNTRY[country] || list[0]?.symbol || '');
         }
       } catch (e) {
         console.error(e);
-        setErr(e?.response?.data?.error || 'โหลดรายชื่อหุ้นไม่สำเร็จ');
-        setSymbols([]);
+        setErrorText(e?.response?.data?.error || 'โหลดรายชื่อหุ้นไม่สำเร็จ');
+        setSymbolList([]);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [country]);
 
-  // ซีรีส์ข้อมูล
+  // ซีรีส์ข้อมูล (tradingOnly=1, requireHL=1)
   useEffect(() => {
-    if (!symbol) return;
+    if (!stockSymbol) return;
     const controller = new AbortController();
     (async () => {
       try {
-        setLoading(true); setErr('');
-        const need = Math.max(TF_LIMIT[tf] ?? TF_LIMIT[DEFAULT_TF], INDICATOR_MIN);
-        const { data } = await axios.get(`${API_BASE}/data?symbol=${encodeURIComponent(symbol)}&limit=${need}`, { ...auth(), signal: controller.signal });
-        const raw = data?.series || [];
-        const cleaned = raw.filter(r => Number(r?.Volume) > 0); // ข้ามวันหยุด
-        setSeries(cleaned);
+        setIsLoading(true); setErrorText('');
+        const need = Math.max(
+          TIMEFRAME_TO_LIMIT[timeframe] ?? TIMEFRAME_TO_LIMIT[DEFAULT_TIMEFRAME],
+          INDICATOR_MIN,
+          FORCE_MIN_BARS
+        );
+        const url = `${API_BASE}/data?symbol=${encodeURIComponent(stockSymbol)}&limit=${need}&tradingOnly=1&requireHL=1`;
+        const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
+        setSeries(data?.series || []);
       } catch (e) {
         if (e.name === 'CanceledError') return;
         console.error(e);
-        setErr(e?.response?.data?.error || 'โหลดข้อมูลหุ้นไม่สำเร็จ');
+        setErrorText(e?.response?.data?.error || 'โหลดข้อมูลหุ้นไม่สำเร็จ');
         setSeries([]);
       } finally {
-        setLoading(false);
+        setIsLoading(false);
       }
     })();
     return () => controller.abort();
-  }, [symbol, tf]);
+  }, [stockSymbol, timeframe]);
 
-  // หน้าต่างตาม timeframe
-  const win = useMemo(() => {
+  // หน้าต่างข้อมูลตาม timeframe
+  const windowSeries = useMemo(() => {
     if (!series.length) return [];
-    if (tf === 'ALL') return series;
-    const n = TF_LIMIT[tf] ?? TF_LIMIT[DEFAULT_TF];
+    if (timeframe === 'ALL') return series;
+    const n = TIMEFRAME_TO_LIMIT[timeframe] ?? TIMEFRAME_TO_LIMIT[DEFAULT_TIMEFRAME];
     return series.slice(-n);
-  }, [series, tf]);
+  }, [series, timeframe]);
 
-  // คำนวณอินดี้ล่าสุด
-  const tech = useMemo(() => computeTechnical(win), [win]);
+  // GLOBAL vs WINDOW
+  const signalTech = useMemo(() => computeTechnical(series), [series]);
+  const cardTech   = useMemo(() => computeTechnical(windowSeries), [windowSeries]);
 
-  // สถิติ timeframe
-  const tfStats = useMemo(() => {
-    if (!win.length) return null;
-    const closes = win.map(d => Number(takeNum(d, 'ClosePrice', 'Close', 'Adj Close', 'AdjClose'))).filter(Number.isFinite);
-    if (!closes.length) return null;
-    const ret = (closes.at(-1) - closes[0]) / closes[0];
-    const rets = [];
-    for (let i = 1; i < closes.length; i++) {
-      if (Number.isFinite(closes[i]) && Number.isFinite(closes[i - 1])) {
-        rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
-      }
+  // Snapshot chips (ใช้ bull/bear/neutral ให้สื่อสาร)
+  const snapshotChips = useMemo(() => {
+    const t = signalTech;
+    if (!t) return [];
+    const chips = [];
+    const v = t.indicators;
+    if (v.SMA_50 != null && v.SMA_200 != null) {
+      const up = v.SMA_50 > v.SMA_200;
+      chips.push({ label: up ? 'MA: Golden Cross' : 'MA: Death Cross', type: up ? 'bull' : 'bear' });
     }
-    const vol = stdev(rets);
-    const mdd = maxDrawdown(closes);
-    return { bars: closes.length, returnPct: ret * 100, volPct: vol * 100, mddPct: mdd * 100 };
-  }, [win]);
-
-  // mini-backtest
-  const bt = useMemo(() => backtestFull(series), [series]);
+    if (v.RSI != null) {
+      const r = v.RSI;
+      chips.push({ label: r > 50 ? 'RSI Bullish' : 'RSI Bearish', type: r>50 ? 'bull' : 'bear' });
+    }
+    if (v.MACD != null && v.MACD_Signal != null) {
+      const up = v.MACD > v.MACD_Signal;
+      chips.push({ label: up ? 'MACD Bullish' : 'MACD Bearish', type: up ? 'bull' : 'bear' });
+    }
+    if (t.price != null && v.Bollinger_High != null && v.Bollinger_Low != null) {
+      const inside = t.price < v.Bollinger_High && t.price > v.Bollinger_Low;
+      const type = inside ? 'neutral' : (t.price >= v.Bollinger_High ? 'bear' : 'bull');
+      chips.push({ label: inside ? 'Inside BB' : (t.price >= v.Bollinger_High ? 'Touch Upper BB' : 'Touch Lower BB'), type });
+    }
+    return chips;
+  }, [signalTech]);
 
   return (
     <Main>
       <Header>Market Trend Analysis</Header>
       <Box>
-        <H3>Technical Indicator Analysis</H3>
+        {/* ส่วนหัว + ฟิลเตอร์ (พื้นหลังแบบ SIGNAL) */}
+        <TopSection>
+          <H3>Technical Indicator Analysis</H3>
+          <Row>
+            <Label>Select Market:&nbsp;</Label>
+            <Select value={country} onChange={e => setCountry(e.target.value)}>
+              <option value="TH">Thailand (TH)</option>
+              <option value="USA">United States (USA)</option>
+            </Select>
 
-        <Row>
-          <label><b>Select Market:&nbsp;</b></label>
-          <Select value={country} onChange={e => setCountry(e.target.value)}>
-            <option value="TH">Thailand (TH)</option>
-            <option value="USA">United States (USA)</option>
-          </Select>
+            <Label> Select Stock:&nbsp;</Label>
+            <Select value={stockSymbol} onChange={e => setStockSymbol(e.target.value)}>
+              {symbolList.map(s => <option key={s.symbol} value={s.symbol}>{s.symbol}</option>)}
+            </Select>
 
-          <label><b>Select Stock:&nbsp;</b></label>
-          <Select value={symbol} onChange={e => setSymbol(e.target.value)}>
-            {symbols.map(s => <option key={s.symbol} value={s.symbol}>{s.symbol}</option>)}
-          </Select>
+            <Label> Timeframe:&nbsp;</Label>
+            <Select value={timeframe} onChange={e => setTimeframe(e.target.value)}>
+              {Object.keys(TIMEFRAME_TO_LIMIT).map(k => <option key={k} value={k}>{k}</option>)}
+            </Select>
+          </Row>
+        </TopSection>
 
-          <label><b>Timeframe:&nbsp;</b></label>
-          <Select value={tf} onChange={e => setTf(e.target.value)}>
-            {Object.keys(TF_LIMIT).map(k => <option key={k} value={k}>{k}</option>)}
-          </Select>
-        </Row>
+        {errorText && <p style={{color:THEME.bearish}}>{errorText}</p>}
+        {isLoading && <p style={{color:THEME.textMuted}}>Loading…</p>}
 
-        {err && <p style={{color:'#dc3545'}}>{err}</p>}
-        {loading && <p style={{color:'#a0a0a0'}}>Loading…</p>}
-
-        {tech ? (
+        {/* LATEST SIGNAL (GLOBAL) */}
+        {signalTech && (
           <>
-            {/* กลุ่มหลัก (MA/EMA, RSI, MACD, BB) */}
-            <Grid>
-              <Card color={tech.v.SMA_50 != null && tech.v.SMA_200 != null ? (tech.v.SMA_50 > tech.v.SMA_200 ? '#28a745' : '#dc3545') : '#6c757d'}>
-                <Title>Moving Averages (SMA/EMA)</Title>
-                <Val>
-                  SMA 50: {tech.v.SMA_50 != null ? tech.v.SMA_50.toFixed(2) : '-'}<br/>
-                  SMA 200: {tech.v.SMA_200 != null ? tech.v.SMA_200.toFixed(2) : '-'}<br/>
-                  EMA 10: {tech.v.EMA_10 != null ? tech.v.EMA_10.toFixed(2) : '-'} &nbsp;|&nbsp;
-                  EMA 20: {tech.v.EMA_20 != null ? tech.v.EMA_20.toFixed(2) : '-'}
-                </Val>
-                <SigText color={tech.v.SMA_50 != null && tech.v.SMA_200 != null ? (tech.v.SMA_50 > tech.v.SMA_200 ? '#28a745' : '#dc3545') : '#6c757d'}>
-                  {tech.v.SMA_50 != null && tech.v.SMA_200 != null
-                    ? (tech.v.SMA_50 > tech.v.SMA_200 ? 'Golden Cross (Uptrend Bias)' : 'Death Cross (Downtrend Bias)')
-                    : 'Neutral'}
-                </SigText>
-              </Card>
+            <SignalWrap>
+              <Label>LATEST SIGNAL</Label>
 
-              <Card color={tech.v.RSI != null ? (tech.v.RSI >= 70 ? '#dc3545' : tech.v.RSI > 50 ? '#28a745' : '#dc3545') : '#6c757d'}>
-                <Title>RSI (14)</Title>
-                <Val style={{fontSize:24}}>{tech.v.RSI != null ? tech.v.RSI.toFixed(2) : '-'}</Val>
-                <SigText color={tech.v.RSI != null ? (tech.v.RSI >= 70 ? '#dc3545' : tech.v.RSI > 50 ? '#28a745' : '#dc3545') : '#6c757d'}>
-                  {tech.v.RSI == null ? 'Neutral' :
-                    tech.v.RSI >= 70 ? 'Overbought' :
-                    tech.v.RSI <= 30 ? 'Oversold' :
-                    tech.v.RSI > 50 ? 'Bullish Momentum' : 'Bearish Momentum'}
-                </SigText>
-              </Card>
+              <SignalMainRow>
+                <BigSignal s={signalTech.signal}>{signalTech.signal}</BigSignal>
+                <PriceBadge>
+                  <PriceLabel>Signal Price</PriceLabel>
+                  <PriceValue>{formatMoneyByMarket(signalTech.price, market)}</PriceValue>
+                </PriceBadge>
+              </SignalMainRow>
 
-              <Card color={tech.v.MACD != null && tech.v.MACD_Signal != null ? (tech.v.MACD > tech.v.MACD_Signal ? '#28a745' : '#dc3545') : '#6c757d'}>
-                <Title>MACD (12,26,9)</Title>
-                <Val>
-                  MACD: {tech.v.MACD != null ? tech.v.MACD.toFixed(4) : '-'}<br/>
-                  Signal: {tech.v.MACD_Signal != null ? tech.v.MACD_Signal.toFixed(4) : '-'}
-                </Val>
-                <SigText color={tech.v.MACD != null && tech.v.MACD_Signal != null ? (tech.v.MACD > tech.v.MACD_Signal ? '#28a745' : '#dc3545') : '#6c757d'}>
-                  {tech.v.MACD != null && tech.v.MACD_Signal != null
-                    ? (tech.v.MACD > tech.v.MACD_Signal ? 'Bullish Crossover' : 'Bearish Crossover')
-                    : 'Neutral'}
-                </SigText>
-              </Card>
+              <ChipRow>
+                {snapshotChips.map((c, i) => (
+                  <Chip key={i} type={c.type}>{c.label}</Chip>
+                ))}
+              </ChipRow>
 
-              <Card color={tech.price != null && tech.v.Bollinger_High != null && tech.v.Bollinger_Low != null ? (tech.price >= tech.v.Bollinger_High ? '#dc3545' : tech.price <= tech.v.Bollinger_Low ? '#28a745' : '#6c757d') : '#6c757d'}>
-                <Title>Bollinger Bands (20,2)</Title>
-                <Val>
-                  Upper: {tech.v.Bollinger_High != null ? tech.v.Bollinger_High.toFixed(2) : '-'}<br/>
-                  Middle: {tech.v.Bollinger_Middle != null ? tech.v.Bollinger_Middle.toFixed(2) : '-'}<br/>
-                  Lower: {tech.v.Bollinger_Low != null ? tech.v.Bollinger_Low.toFixed(2) : '-'}
-                </Val>
-                <SigText color={tech.price != null && tech.v.Bollinger_High != null && tech.v.Bollinger_Low != null ? (tech.price >= tech.v.Bollinger_High ? '#dc3545' : tech.price <= tech.v.Bollinger_Low ? '#28a745' : '#6c757d') : '#6c757d'}>
-                  {tech.price != null && tech.v.Bollinger_High != null && tech.v.Bollinger_Low != null
-                    ? (tech.price >= tech.v.Bollinger_High ? 'Price at/above Upper Band'
-                      : tech.price <= tech.v.Bollinger_Low ? 'Price at/below Lower Band'
-                      : 'Price near Middle Band')
-                    : 'Price near Middle Band'}
-                </SigText>
-              </Card>
-            </Grid>
+              <p style={{marginTop:8, lineHeight:1.5}}>
+                <b>Reason:</b>{' '}
+                {(signalTech.reasons?.length
+                  ? signalTech.reasons.slice(0,5).join(' • ')
+                  : 'สภาวะยังไม่ชัดเจน (คะแนนกลาง ๆ)')}
+              </p>
+            </SignalWrap>
 
-            {/* Advanced Indicators */}
-            <H3 style={{marginTop:30}}>Advanced Indicators</H3>
-            <Grid>
-              <Card color="#ff8c00">
-                <Title>ATR (14)</Title>
-                <Val>ATR: {tech.v.ATR != null ? tech.v.ATR.toFixed(4) : '-'}</Val>
-                <SigText>Average True Range</SigText>
-              </Card>
+            {/* Core Indicators (WINDOW) */}
+            <H3 style={{marginTop:18}}>
+              Core Indicators <span style={{color:THEME.textMuted, fontSize:12}}>— based on selected timeframe window</span>
+            </H3>
+            {cardTech ? (
+              <Grid>
+                {/* MAs */}
+                <Card color={accent(
+                  cardTech.indicators.SMA_50 != null && cardTech.indicators.SMA_200 != null
+                    ? (cardTech.indicators.SMA_50 > cardTech.indicators.SMA_200 ? THEME.bullish : THEME.bearish)
+                    : THEME.neutral
+                )}>
+                  <Title>Moving Averages (SMA/EMA)</Title>
+                  <Val>
+                    SMA 50: {cardTech.indicators.SMA_50 != null ? cardTech.indicators.SMA_50.toFixed(2) : '—'}<br/>
+                    SMA 200: {cardTech.indicators.SMA_200 != null ? cardTech.indicators.SMA_200.toFixed(2) : '—'}<br/>
+                    EMA 10: {cardTech.indicators.EMA_10 != null ? cardTech.indicators.EMA_10.toFixed(2) : '—'} &nbsp;|&nbsp;
+                    EMA 20: {cardTech.indicators.EMA_20 != null ? cardTech.indicators.EMA_20.toFixed(2) : '—'}
+                  </Val>
+                  <SigText color={accent(
+                    cardTech.indicators.SMA_50 != null && cardTech.indicators.SMA_200 != null
+                      ? (cardTech.indicators.SMA_50 > cardTech.indicators.SMA_200 ? THEME.bullish : THEME.bearish)
+                      : THEME.neutral
+                  )}>
+                    {cardTech.indicators.SMA_50 != null && cardTech.indicators.SMA_200 != null
+                      ? (cardTech.indicators.SMA_50 > cardTech.indicators.SMA_200 ? 'Golden Cross (Uptrend Bias)' : 'Death Cross (Downtrend Bias)')
+                      : 'Insufficient bars in window'}
+                  </SigText>
+                </Card>
 
-              <Card color="#20c997">
-                <Title>Keltner Channel</Title>
-                <Val>
-                  High: {tech.v.Keltner_High != null ? tech.v.Keltner_High.toFixed(2) : '-'}<br/>
-                  Middle: {tech.v.Keltner_Middle != null ? tech.v.Keltner_Middle.toFixed(2) : '-'}<br/>
-                  Low: {tech.v.Keltner_Low != null ? tech.v.Keltner_Low.toFixed(2) : '-'}
-                </Val>
-                <SigText>EMA(typical,20) ± 2 × ATR(10)</SigText>
-              </Card>
+                {/* RSI */}
+                <Card color={accent(
+                  cardTech.indicators.RSI != null
+                    ? (cardTech.indicators.RSI >= 70 ? THEME.bearish
+                      : cardTech.indicators.RSI <= 30 ? THEME.bullish
+                      : cardTech.indicators.RSI > 50 ? THEME.bullish : THEME.bearish)
+                    : THEME.neutral
+                )}>
+                  <Title>RSI (14)</Title>
+                  <Val style={{fontSize:22}}>{cardTech.indicators.RSI != null ? cardTech.indicators.RSI.toFixed(2) : '—'}</Val>
+                  <SigText color={accent(
+                    cardTech.indicators.RSI != null
+                      ? (cardTech.indicators.RSI >= 70 ? THEME.bearish
+                        : cardTech.indicators.RSI <= 30 ? THEME.bullish
+                        : cardTech.indicators.RSI > 50 ? THEME.bullish : THEME.bearish)
+                      : THEME.neutral
+                  )}>
+                    {cardTech.indicators.RSI == null ? 'Insufficient bars in window' :
+                      cardTech.indicators.RSI >= 70 ? 'Overbought' :
+                      cardTech.indicators.RSI <= 30 ? 'Oversold' :
+                      cardTech.indicators.RSI > 50 ? 'Bullish Momentum' : 'Bearish Momentum'}
+                  </SigText>
+                </Card>
 
-              <Card color="#0dcaf0">
-                <Title>Chaikin Volatility</Title>
-                <Val>{tech.v.Chaikin_Vol != null ? `${tech.v.Chaikin_Vol.toFixed(2)}%` : '-'}</Val>
-                <SigText>ROC(10) of EMA(High−Low,10)</SigText>
-              </Card>
+                {/* MACD */}
+                <Card color={accent(
+                  cardTech.indicators.MACD != null && cardTech.indicators.MACD_Signal != null
+                    ? (cardTech.indicators.MACD > cardTech.indicators.MACD_Signal ? THEME.bullish : THEME.bearish)
+                    : THEME.neutral
+                )}>
+                  <Title>MACD (12,26,9)</Title>
+                  <Val>
+                    MACD: {cardTech.indicators.MACD != null ? cardTech.indicators.MACD.toFixed(4) : '—'}<br/>
+                    Signal: {cardTech.indicators.MACD_Signal != null ? cardTech.indicators.MACD_Signal.toFixed(4) : '—'}
+                  </Val>
+                  <SigText color={accent(
+                    cardTech.indicators.MACD != null && cardTech.indicators.MACD_Signal != null
+                      ? (cardTech.indicators.MACD > cardTech.indicators.MACD_Signal ? THEME.bullish : THEME.bearish)
+                      : THEME.neutral
+                  )}>
+                    {cardTech.indicators.MACD != null && cardTech.indicators.MACD_Signal != null
+                      ? (cardTech.indicators.MACD > cardTech.indicators.MACD_Signal ? 'Bullish Crossover' : 'Bearish Crossover')
+                      : 'Insufficient bars in window'}
+                  </SigText>
+                </Card>
 
-              <Card color="#a78bfa">
-                <Title>Donchian Channel (20)</Title>
-                <Val>
-                  Upper: {tech.v.Donchian_High != null ? tech.v.Donchian_High.toFixed(2) : '-'}<br/>
-                  Lower: {tech.v.Donchian_Low != null ? tech.v.Donchian_Low.toFixed(2) : '-'}
-                </Val>
-                <SigText>20-bar Highest / Lowest</SigText>
-              </Card>
+                {/* Bollinger */}
+                <Card color={accent(
+                  cardTech.price != null && cardTech.indicators.Bollinger_High != null && cardTech.indicators.Bollinger_Low != null
+                    ? (cardTech.price >= cardTech.indicators.Bollinger_High ? THEME.bearish
+                      : cardTech.price <= cardTech.indicators.Bollinger_Low ? THEME.bullish
+                      : THEME.neutral)
+                    : THEME.neutral
+                )}>
+                  <Title>Bollinger Bands (20,2)</Title>
+                  <Val>
+                    Upper: {cardTech.indicators.Bollinger_High != null ? cardTech.indicators.Bollinger_High.toFixed(2) : '—'}<br/>
+                    Middle: {cardTech.indicators.Bollinger_Middle != null ? cardTech.indicators.Bollinger_Middle.toFixed(2) : '—'}<br/>
+                    Lower: {cardTech.indicators.Bollinger_Low != null ? cardTech.indicators.Bollinger_Low.toFixed(2) : '—'}
+                  </Val>
+                  <SigText color={accent(
+                    cardTech.price != null && cardTech.indicators.Bollinger_High != null && cardTech.indicators.Bollinger_Low != null
+                      ? (cardTech.price >= cardTech.indicators.Bollinger_High ? THEME.bearish
+                        : cardTech.price <= cardTech.indicators.Bollinger_Low ? THEME.bullish
+                        : THEME.neutral)
+                      : THEME.neutral
+                  )}>
+                    {cardTech.price != null && cardTech.indicators.Bollinger_High != null && cardTech.indicators.Bollinger_Low != null
+                      ? (cardTech.price >= cardTech.indicators.Bollinger_High ? 'Price at/above Upper Band'
+                        : cardTech.price <= cardTech.indicators.Bollinger_Low ? 'Price at/below Lower Band'
+                        : 'Price inside Bands')
+                      : 'Insufficient bars in window'}
+                  </SigText>
+                </Card>
+              </Grid>
+            ) : (
+              <p style={{color:THEME.textMuted}}>ยังไม่มีข้อมูลพอสำหรับ timeframe นี้</p>
+            )}
 
-              <Card color="#f97316">
-                <Title>Parabolic SAR</Title>
-                <Val>PSAR: {tech.v.PSAR != null ? tech.v.PSAR.toFixed(2) : '-'}</Val>
-                <SigText>step 0.02, max 0.2</SigText>
-              </Card>
-            </Grid>
+            {/* Advanced Indicators (WINDOW) */}
+            <Toggle onClick={() => setShowAdvanced(s => !s)}>
+              {showAdvanced ? 'Hide Advanced Indicators' : 'Show Advanced Indicators'}
+            </Toggle>
 
-          
+            {showAdvanced && cardTech && (
+              <>
+                <H3 style={{marginTop:14}}>
+                  Advanced Indicators <span style={{color:THEME.textMuted, fontSize:12}}>— based on selected timeframe window</span>
+                </H3>
+                <Grid>
+                  <Card color={THEME.brand}>
+                    <Title>ATR (14)</Title>
+                    <Val>ATR: {cardTech.indicators.ATR != null ? cardTech.indicators.ATR.toFixed(4) : '—'}</Val>
+                    <SigText>Average True Range</SigText>
+                  </Card>
 
-            <H3 style={{marginTop:30}}>Strategy & Signals</H3>
-            <Strat>
-              <div>
-                <p style={{margin:0, color:'#a0a0a0'}}>LATEST SIGNAL</p>
-                <Big s={tech.signal}>{tech.signal}</Big>
-              </div>
-              <div style={{minWidth:300}}>
-                <p><b>Reason:</b> {tech.signal === 'HOLD' ? 'สภาวะยังไม่ชัดเจน (คะแนนกลาง ๆ)' : tech.reasons.slice(0,3).join(' • ')}</p>
-                <p><b>Signal Price:</b> {fmtMoney(tech.price, market)}</p>
-                <p><b>Confidence:</b> {tech.confidence}%</p>
-                {bt.total >= 20 ? (
-                  <p><b>Strategy Effectiveness (mini-backtest):</b> {bt.effectiveness}% (hits {bt.hits}/{bt.total}, lookahead {bt.lookahead})</p>
-                ) : (
-                  <p style={{color:'#9ca3af'}}>Backtest not shown (insufficient signals in full history).</p>
-                )}
-              </div>
-            </Strat>
+                  <Card color={THEME.brand}>
+                    <Title>Keltner Channel</Title>
+                    <Val>
+                      High: {cardTech.indicators.Keltner_High != null ? cardTech.indicators.Keltner_High.toFixed(2) : '—'}<br/>
+                      Middle: {cardTech.indicators.Keltner_Middle != null ? cardTech.indicators.Keltner_Middle.toFixed(2) : '—'}<br/>
+                      Low: {cardTech.indicators.Keltner_Low != null ? cardTech.indicators.Keltner_Low.toFixed(2) : '—'}
+                    </Val>
+                    <SigText>EMA(typical,20) ± 2×ATR(10)</SigText>
+                  </Card>
+
+                  <Card color={THEME.brand}>
+                    <Title>Chaikin Volatility</Title>
+                    <Val>{cardTech.indicators.Chaikin_Vol != null ? `${cardTech.indicators.Chaikin_Vol.toFixed(2)}%` : '—'}</Val>
+                    <SigText>ROC(10) of EMA(High−Low,10)</SigText>
+                  </Card>
+
+                  <Card color={THEME.brand}>
+                    <Title>Donchian Channel (20)</Title>
+                    <Val>
+                      Upper: {cardTech.indicators.Donchian_High != null ? cardTech.indicators.Donchian_High.toFixed(2) : '—'}<br/>
+                      Lower: {cardTech.indicators.Donchian_Low != null ? cardTech.indicators.Donchian_Low.toFixed(2) : '—'}
+                    </Val>
+                    <SigText>20-bar Highest / Lowest</SigText>
+                  </Card>
+
+                  <Card color={THEME.brand}>
+                    <Title>Parabolic SAR</Title>
+                    <Val>PSAR: {cardTech.indicators.PSAR != null ? cardTech.indicators.PSAR.toFixed(2) : '—'}</Val>
+                    <SigText>step 0.02, max 0.2</SigText>
+                  </Card>
+                </Grid>
+              </>
+            )}
           </>
-        ) : (
-          <p style={{color:'#a0a0a0'}}>Loading technical data…</p>
         )}
+
+        {!signalTech && <p style={{color:THEME.textMuted}}>Loading technical data…</p>}
       </Box>
     </Main>
   );
