@@ -11,19 +11,14 @@ import { useNavigate } from 'react-router-dom';
 const API_BASE = 'http://localhost:3000/api';
 const COUNTRY_TO_MARKET = { TH: 'Thailand', USA: 'America' };
 
-// เปิดมาที่ USA + 1Y + โหมดกลุ่มแบบ Industry เท่านั้น (ตัด Sector ออกทั้งหมด)
 const DEFAULT_COUNTRY = 'USA';
 const DEFAULT_WINDOW = '1Y';
-const GROUP_BY_MODE = 'industry'; // 🔒 ใช้ industry อย่างเดียว
+const MAX_SERIES = 1;
 
-const MAX_SERIES = 10;
 const WINDOWS = ['5D', '1M', '3M', '6M', '1Y', 'ALL'];
+const COLORS = ['#ff8c00'];
 
-const COLORS = [
-  '#ff8c00', '#0dcaf0', '#20c997', '#a78bfa', '#ef4444', '#22c55e',
-  '#f59e0b', '#3b82f6', '#eab308', '#10b981', '#f97316', '#8b5cf6'
-];
-
+/* ======================= UTILS ======================= */
 const getAuthHeaders = () => {
   const token = localStorage.getItem('adminToken');
   return token ? { headers: { Authorization: `Bearer ${token}` } } : {};
@@ -39,18 +34,64 @@ const fmtDate = (iso) => {
   return `${y}-${m}-${da}`;
 };
 
-/* ===== helpers ===== */
-const combineByDateIndexValue = (seriesMap) => {
-  // สำหรับโหมด "กลุ่ม": arr item = {date, value}
-  const index = new Map();
-  Object.entries(seriesMap).forEach(([key, arr]) => {
-    arr.forEach(({ date, value }) => {
-      if (!index.has(date)) index.set(date, { date });
-      index.get(date)[key] = value;
-    });
-  });
-  return Array.from(index.values()).sort((a, b) => new Date(a.date) - new Date(b.date));
+// เลือก delta ชุดที่ใช้ (YoY/QoQ) จาก summary + แถวล่าสุด
+const chooseBaseDelta = (latestSummary, lastRow) => {
+  if (!latestSummary || !lastRow) return { base: 'YoY', d: {} };
+  const base = latestSummary.base || 'YoY';
+  const d = base === 'YoY' ? (lastRow.yoy || {}) : (lastRow.qoq || {});
+  return { base, d };
 };
+
+// แปลง ΔD/E จาก Δ×100 -> x (เช่น 7.00 -> 0.07x)
+const fmtDeltaDE = (v) => (v == null ? '—' : `${(v / 100).toFixed(2)}x`);
+
+function buildReasons(d) {
+  const pos = [], neg = [];
+  const push = (cond, arr, txt) => cond && arr.push(txt);
+
+  if (d.eps != null) {
+    push(d.eps >= 0, pos, `EPS เพิ่ม ${d.eps.toFixed(2)}% → กำไรต่อหุ้นดีขึ้น`);
+    push(d.eps < 0,  neg, `EPS ลด ${d.eps.toFixed(2)}% → อาจมีกำไรหดหรือ dilution`);
+  }
+  if (d.revenue != null) {
+    push(d.revenue >= 0, pos, `รายได้โต ${d.revenue.toFixed(2)}% → ความต้องการ/ราคาขายดีขึ้น`);
+    push(d.revenue < 0,  neg, `รายได้หด ${d.revenue.toFixed(2)}% → อุปสงค์ชะลอหรือเสียส่วนแบ่ง`);
+  }
+  if (d.grossMarginPct != null) {
+    const at = Math.abs(d.grossMarginPct).toFixed(2);
+    push(d.grossMarginPct >= 0, pos, `Gross Margin เพิ่ม ${at}pp → ต้นทุน/มิกซ์ดีขึ้น`);
+    push(d.grossMarginPct < 0,  neg, `Gross Margin ลด ${at}pp → ต้นทุนสูง/กดราคาแข่ง`);
+  }
+  if (d.netMarginPct != null) {
+    const at = Math.abs(d.netMarginPct).toFixed(2);
+    push(d.netMarginPct >= 0, pos, `Net Margin เพิ่ม ${at}pp → คุมค่าใช้จ่าย/ดอกเบี้ย/ภาษีดีขึ้น`);
+    push(d.netMarginPct < 0,  neg, `Net Margin ลด ${at}pp → ค่าใช้จ่าย/ภาษี/ดอกเบี้ยสูงขึ้น`);
+  }
+  if (d.roePct != null) {
+    const at = Math.abs(d.roePct).toFixed(2);
+    push(d.roePct >= 0, pos, `ROE เพิ่ม ${at}pp → ใช้ทุนมีประสิทธิภาพขึ้น`);
+    push(d.roePct < 0,  neg, `ROE ลด ${at}pp → ประสิทธิภาพต่อทุนลดลง`);
+  }
+  if (d.ocf != null) {
+    push(d.ocf >= 0, pos, `Operating CF เพิ่ม ${d.ocf.toFixed(2)}% → คุณภาพกำไรแข็งแรง`);
+    push(d.ocf < 0,  neg, `Operating CF ลด ${d.ocf.toFixed(2)}% → ระวังลูกหนี้/สต๊อก/เก็บเงินช้า`);
+  }
+  if (d.d2e != null) {
+    const x = d.d2e / 100;
+    push(x <= 0, pos, `D/E ลด ${Math.abs(x).toFixed(2)}x → ความเสี่ยงการเงินลดลง`);
+    push(x >  0, neg, `D/E เพิ่ม ${x.toFixed(2)}x → leverage สูงขึ้น`);
+  }
+
+  // เรียงให้ตัวแรงขึ้นก่อน
+  const byAbs = (t) => {
+    const m = t.match(/([-+]?\d+(\.\d+)?)(%|pp|x)/);
+    return m ? -Math.abs(parseFloat(m[1])) : 0;
+  };
+  pos.sort((a,b)=>byAbs(a)-byAbs(b));
+  neg.sort((a,b)=>byAbs(a)-byAbs(b));
+
+  return { pos, neg };
+}
 
 /* ======================= STYLED ======================= */
 const Page = styled.div` padding:20px; display:flex; flex-direction:column; gap:20px; `;
@@ -68,29 +109,32 @@ const Segments = styled.div`
   > button { padding:6px 12px; border:0; border-radius:6px; color:#e0e0e0; background:transparent; font-weight:800; cursor:pointer; }
   > button.active { background:#ff8c00; color:#111; }
 `;
-const TwoCol = styled.div`
-  display:grid; grid-template-columns: 1fr 1fr; gap:16px;
-  @media (max-width: 1100px){ grid-template-columns: 1fr; }
-`;
-const ListCard = styled(Card)` max-height:420px; overflow:auto; `;
-const Row = styled.div`
-  display:flex; justify-content:space-between; padding:10px 6px; border-bottom:1px solid #2a2a2a;
-  cursor: pointer; &:hover { background:#252525; }
-`;
-const Sym = styled.span` font-weight:800; `;
-const Pct = styled.span` font-weight:800; `;
-const LegendWrap = styled.div`
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 10px 14px; padding-top: 8px;
-`;
+const LegendWrap = styled.div` margin-top:8px; `;
 const LegendItem = styled.div`
-  display: inline-flex; align-items: center; gap: 8px;
-  font-weight: 800; user-select: none; outline: none;
-  ${({ clickable }) => clickable ? 'cursor:pointer;&:hover{opacity:.9;text-decoration:underline;}' : 'opacity:.95;'}
+  display:inline-flex; align-items:center; gap:8px; font-weight:800; user-select:none;
+  color:#ff8c00; cursor:pointer;
 `;
-const LegendDot = styled.span` display:inline-block; width:8px; height:8px; border-radius:50%; background: ${p => p.color || '#999'}; `;
-const LegendLabel = styled.span` max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; `;
-const Hint = styled.div` color:#9aa; font-size:12px; margin-top:6px; `;
+const LegendDot = styled.span` display:inline-block; width:8px; height:8px; border-radius:50%; background:#ff8c00; `;
+
+const Badge = styled.span`
+  padding:4px 8px; border-radius:999px; font-weight:800;
+  ${({ type }) => type === 'bull' ? 'background:#062; color:#8df;' :
+                  type === 'bear' ? 'background:#320; color:#fba;' :
+                  'background:#333; color:#ccc;'}
+`;
+
+const Grid = styled.div`
+  display:grid; gap:10px;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  @media (max-width: 900px){ grid-template-columns: 1fr; }
+`;
+const Kpi = styled.div`
+  background:#191919; border:1px solid #2a2a2a; border-radius:10px; padding:12px;
+  > div.label { color:#99a; font-size:12px; }
+  > div.val { font-size:18px; font-weight:800; }
+  > div.delta { font-size:12px; color:#ccc; }
+`;
+const Bullet = styled.li` margin:6px 0; `;
 
 /* ======================= COMPONENT ======================= */
 export default function Dashboard() {
@@ -99,28 +143,23 @@ export default function Dashboard() {
   // controls
   const [country, setCountry] = useState(DEFAULT_COUNTRY);
   const [symbols, setSymbols] = useState([]);
-  const [symbol, setSymbol] = useState('ALL');      // 'ALL' = โหมดกลุ่ม
+  const [symbol, setSymbol] = useState('');
   const [timeframe, setTimeframe] = useState(DEFAULT_WINDOW);
-
-  // โหมดกลุ่ม (ALL)
-  const [groups, setGroups] = useState([]);         // [{key,label,count}]
 
   // chart
   const [chartRows, setChartRows] = useState([]);
   const [loadingChart, setLoadingChart] = useState(false);
   const [errChart, setErrChart] = useState('');
 
-  // movers
-  const [gainers, setGainers] = useState([]);
-  const [losers, setLosers] = useState([]);
-  const [loadingMovers, setLoadingMovers] = useState(false);
-  const [errMovers, setErrMovers] = useState('');
+  // fundamentals drivers
+  const [drivers, setDrivers] = useState(null);
+  const [loadingDrivers, setLoadingDrivers] = useState(false);
+  const [errDrivers, setErrDrivers] = useState('');
 
   const market = COUNTRY_TO_MARKET[country];
-  const isAll = symbol === 'ALL';
 
   const goToTrend = (sym) => {
-    if (!sym || isAll) return;
+    if (!sym) return;
     const params = new URLSearchParams({ market, symbol: sym, timeframe });
     navigate(`/market-trend?${params.toString()}`);
   };
@@ -135,70 +174,27 @@ export default function Dashboard() {
         );
         const list = (data?.data || []).map(r => ({ symbol: r.StockSymbol, name: r.CompanyName || r.StockSymbol }));
         setSymbols(list);
-        setSymbol(list.length > 1 ? 'ALL' : (list[0]?.symbol || ''));
+        setSymbol(list[0]?.symbol || '');
       } catch {
-        setSymbols([]); setSymbol('ALL');
+        setSymbols([]); setSymbol('');
       }
     })();
   }, [country, market]);
 
-  /* ---------- โหลดรายชื่อกลุ่ม (Industry-only) เมื่อโหมด ALL ---------- */
-  useEffect(() => {
-    if (!isAll) { setGroups([]); return; }
-    (async () => {
-      try {
-        const { data } = await axios.get(
-          `${API_BASE}/meta/groups?market=${encodeURIComponent(market)}&groupBy=${encodeURIComponent(GROUP_BY_MODE)}`,
-          getAuthHeaders()
-        );
-        const rows = data?.data || [];
-        setGroups(rows.slice(0, MAX_SERIES)); // เอาท็อป MAX_SERIES
-      } catch {
-        setGroups([]);
-      }
-    })();
-  }, [isAll, market]);
-
-  /* ---------- โหลดกราฟ ---------- */
+  /* ---------- โหลดกราฟ (เฉพาะรายสัญลักษณ์) ---------- */
   useEffect(() => {
     if (!symbol) { setChartRows([]); return; }
     const controller = new AbortController();
     (async () => {
       try {
         setLoadingChart(true); setErrChart('');
-
-        // 1) โหมดหุ้นรายตัว
-        if (!isAll) {
-          const url = `${API_BASE}/chart-data/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(timeframe)}`;
-          const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
-          const rows = (data?.data || []).map(r => ({
-            date: r.date,
-            [symbol]: Number(r.ClosePrice)
-          }));
-          setChartRows(rows);
-          return;
-        }
-
-        // 2) โหมดกลุ่ม (ALL) -> group composite แบบ Equal-Weight (Indexed = 100)
-        if (!groups.length) { setChartRows([]); return; }
-
-        const fetchGroup = async (gkey) => {
-          const url = `${API_BASE}/benchmarks/group-composite?market=${encodeURIComponent(market)}&groupBy=${encodeURIComponent(GROUP_BY_MODE)}&key=${encodeURIComponent(gkey)}&timeframe=${encodeURIComponent(timeframe)}&method=equal`;
-          const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
-          return (data?.data || []).map(x => ({ date: x.date, value: Number(x.index) })); // index = normalized 100
-        };
-
-        const pick = groups.slice(0, MAX_SERIES).map(g => g.key);
-        const settled = await Promise.allSettled(pick.map(k => fetchGroup(k)));
-
-        const seriesMap = {};
-        settled.forEach((r, i) => {
-          const key = pick[i];
-          if (r.status === 'fulfilled' && r.value.length) seriesMap[key] = r.value;
-        });
-
-        const merged = combineByDateIndexValue(seriesMap);
-        setChartRows(merged);
+        const url = `${API_BASE}/chart-data/${encodeURIComponent(symbol)}?timeframe=${encodeURIComponent(timeframe)}`;
+        const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
+        const rows = (data?.data || []).map(r => ({
+          date: r.date,
+          [symbol]: Number(r.ClosePrice)
+        }));
+        setChartRows(rows);
       } catch (e) {
         if (e.name !== 'CanceledError') setErrChart('โหลดข้อมูลกราฟไม่สำเร็จ');
         setChartRows([]);
@@ -207,64 +203,70 @@ export default function Dashboard() {
       }
     })();
     return () => controller.abort();
-  }, [symbol, timeframe, isAll, market, groups]);
+  }, [symbol, timeframe, market]);
 
-  /* ---------- โหลด Gainers/Losers ---------- */
+  /* ---------- โหลด Fundamental Drivers ---------- */
   useEffect(() => {
+    if (!symbol) { setDrivers(null); return; }
     const controller = new AbortController();
     (async () => {
       try {
-        setLoadingMovers(true); setErrMovers('');
-        const url = `${API_BASE}/market-movers/range?market=${encodeURIComponent(market)}&timeframe=${encodeURIComponent(timeframe)}&limitSymbols=5000`;
+        setLoadingDrivers(true); setErrDrivers('');
+        const url = `${API_BASE}/fundamentals/drivers?market=${encodeURIComponent(market)}&symbol=${encodeURIComponent(symbol)}&limitQuarters=8`;
         const { data } = await axios.get(url, { ...getAuthHeaders(), signal: controller.signal });
-        const rows = data?.data || [];
-        const g = rows.filter(r => (r.changePct ?? 0) > 0).sort((a, b) => b.changePct - a.changePct);
-        const l = rows.filter(r => (r.changePct ?? 0) < 0).sort((a, b) => a.changePct - b.changePct);
-        setGainers(g); setLosers(l);
+        setDrivers(data);
       } catch (e) {
-        if (e.name !== 'CanceledError') setErrMovers('โหลด gainers/losers ไม่สำเร็จ');
-        setGainers([]); setLosers([]);
+        if (e.name !== 'CanceledError') setErrDrivers('วิเคราะห์งบไม่สำเร็จ');
+        setDrivers(null);
       } finally {
-        setLoadingMovers(false);
+        setLoadingDrivers(false);
       }
     })();
     return () => controller.abort();
-  }, [market, timeframe]);
+  }, [symbol, market]);
 
-  /* สร้างรายชื่อเส้นจากทุกแถว */
+  /* ---------- สร้างเส้นราคา ---------- */
   const lines = useMemo(() => {
-    if (!chartRows.length) return [];
-    const set = new Set();
-    for (const row of chartRows) {
-      for (const k of Object.keys(row)) {
-        if (k !== 'date') set.add(k);
-      }
-    }
-    return Array.from(set).slice(0, MAX_SERIES);
-  }, [chartRows]);
+    if (!chartRows.length || !symbol) return [];
+    return [symbol];
+  }, [chartRows, symbol]);
+
+  /* ---------- เตรียมข้อมูลสรุป/เหตุผล ---------- */
+  const latest = drivers?.summary || null;
+  const lastRow = drivers?.data?.[drivers?.data?.length - 1] || null;
+  const latestMetrics = lastRow?.metrics || {};
+  const yoy = lastRow?.yoy || {};
+  const qoq = lastRow?.qoq || {};
+  const badgeType = latest ? (latest.score >= 0 ? 'bull' : 'bear') : 'neutral';
+
+  const { base: usedBase, d: usedDelta } = useMemo(
+    () => chooseBaseDelta(latest, lastRow),
+    [latest, lastRow]
+  );
+  const human = useMemo(
+    () => buildReasons(usedDelta),
+    [usedDelta]
+  );
 
   return (
     <Page>
-      <Title>Dashboard Overview</Title>
+      <Title>Dashboard — Fundamentals (Per Stock)</Title>
 
+      {/* Controls */}
       <Card>
         <HeaderRow>
           <Left>
-            <SubTitle>
-              {isAll ? `Price — ${market} (Indexed = 100)` : `Price — ${market}`}
-            </SubTitle>
+            <SubTitle>Price — {market}</SubTitle>
 
             <Select value={country} onChange={e => setCountry(e.target.value)}>
               <option value="TH">Thailand (TH)</option>
               <option value="USA">United States (USA)</option>
             </Select>
 
-            {/* เลือกหุ้น/โหมด ALL */}
+            {/* เลือกหุ้น */}
             <Select value={symbol} onChange={e => setSymbol(e.target.value)}>
-              {symbols.length > 1 && <option value="ALL">ALL (Group)</option>}
               {symbols.map(s => <option key={s.symbol} value={s.symbol}>{s.symbol}</option>)}
             </Select>
-            {/* ✅ ไม่มีป้าย/ปุ่ม Industry แล้ว */}
           </Left>
 
           <Segments>
@@ -274,10 +276,10 @@ export default function Dashboard() {
           </Segments>
         </HeaderRow>
 
-       
         {errChart && <div style={{ color: '#ef4444', marginTop: 6 }}>{errChart}</div>}
         {loadingChart && <div style={{ color: '#a0a0a0', marginTop: 6 }}>Loading chart...</div>}
 
+        {/* กราฟราคาอย่างเดียว */}
         <div style={{ height: 420, marginTop: 8 }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartRows} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
@@ -290,11 +292,9 @@ export default function Dashboard() {
                 contentStyle={{ background: '#2a2a2a', border: '1px solid #444', color: '#eee' }}
                 wrapperStyle={{ zIndex: 20 }}
               />
-
-              {/* เส้นจริง — คลิกเส้นเพื่อไปหน้า Market Trend (เฉพาะโหมดหุ้นรายตัว) */}
               {lines.map((k, idx) => (
                 <Line
-                  key={`vis-${k}`}
+                  key={`price-${k}`}
                   type="monotone"
                   dataKey={k}
                   name={k}
@@ -303,64 +303,101 @@ export default function Dashboard() {
                   dot={false}
                   isAnimationActive={false}
                   connectNulls
-                  onClick={() => { if (!isAll) goToTrend(k); }}
-                  style={{
-                    cursor: !isAll ? 'pointer' : 'default',
-                    // ให้คลิกถูกเส้นได้จริงบน path
-                    pointerEvents: !isAll ? 'visibleStroke' : 'none'
-                  }}
+                  onClick={() => goToTrend(k)}
+                  style={{ cursor: 'pointer', pointerEvents: 'visibleStroke' }}
                 />
               ))}
             </LineChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Legend แบบกริดอยู่นอกกราฟ (คลิกได้เฉพาะโหมดหุ้นรายตัว) */}
-        <div style={{ marginTop: 8 }}>
+        {/* Legend */}
+        {symbol && (
           <LegendWrap>
-            {lines.map((name, i) => (
-              <LegendItem
-                key={name}
-                clickable={!isAll}
-                onClick={!isAll ? () => goToTrend(name) : undefined}
-                title={name}
-                style={{ color: COLORS[i % COLORS.length] }}
-              >
-                <LegendDot color={COLORS[i % COLORS.length]} />
-                <LegendLabel>{name}</LegendLabel>
-              </LegendItem>
-            ))}
+            <LegendItem title={symbol} onClick={() => goToTrend(symbol)}>
+              <LegendDot />
+              <span>{symbol}</span>
+            </LegendItem>
           </LegendWrap>
-        </div>
+        )}
       </Card>
 
-      <TwoCol>
-        <ListCard>
-          <SubTitle>Gainers — {market} ({timeframe})</SubTitle>
-          {errMovers && <div style={{ color: '#ef4444', marginTop: 6 }}>{errMovers}</div>}
-          {loadingMovers && <div style={{ color: '#a0a0a0', marginTop: 6 }}>Loading...</div>}
-          {!loadingMovers && !gainers.length && <div style={{ color: '#aaa', marginTop: 8 }}>No data</div>}
-          {gainers.map(r => (
-            <Row key={`G-${r.StockSymbol}`} onClick={() => goToTrend(r.StockSymbol)} title="Open in Market Trend">
-              <Sym>{r.StockSymbol}</Sym>
-              <Pct style={{ color: '#22c55e' }}>{fmt(r.changePct, 2)}%</Pct>
-            </Row>
-          ))}
-        </ListCard>
+      {/* ======= การ์ดสรุป “ทำไมขึ้น/ลง” จากงบ ======= */}
+      <Card>
+        <SubTitle>Why Up / Down — จากงบการเงิน ({symbol})</SubTitle>
+        {errDrivers && <div style={{ color: '#ef4444', marginTop: 6 }}>{errDrivers}</div>}
+        {loadingDrivers && <div style={{ color: '#a0a0a0', marginTop: 6 }}>Analyzing fundamentals…</div>}
 
-        <ListCard>
-          <SubTitle>Losers — {market} ({timeframe})</SubTitle>
-          {errMovers && <div style={{ color: '#ef4444', marginTop: 6 }}>{errMovers}</div>}
-          {loadingMovers && <div style={{ color: '#a0a0a0', marginTop: 6 }}>Loading...</div>}
-          {!loadingMovers && !losers.length && <div style={{ color: '#aaa', marginTop: 8 }}>No data</div>}
-          {losers.map(r => (
-            <Row key={`L-${r.StockSymbol}`} onClick={() => goToTrend(r.StockSymbol)} title="Open in Market Trend">
-              <Sym>{r.StockSymbol}</Sym>
-              <Pct style={{ color: '#ef4444' }}>{fmt(r.changePct, 2)}%</Pct>
-            </Row>
-          ))}
-        </ListCard>
-      </TwoCol>
+        {!loadingDrivers && drivers && (
+          <>
+            <div style={{ marginTop: 8, display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
+              <Badge type={badgeType}>
+                {latest?.score >= 0 ? 'Bullish pressure' : 'Bearish pressure'} ({usedBase})
+              </Badge>
+              <div style={{ color:'#9aa' }}>
+                Latest: <b>{latest?.latestQuarter || '—'}</b> {latest?.reportDate ? ` • reported ${fmtDate(latest.reportDate)}` : ''}
+              </div>
+            </div>
+
+            <Grid style={{ marginTop: 12 }}>
+              <Card>
+                <SubTitle>เหตุผลหนุน</SubTitle>
+                <ul style={{ marginTop: 8 }}>
+                  {human.pos.length ? human.pos.map((t, i) => <Bullet key={`p${i}`}>✓ {t}</Bullet>) : <div style={{ color:'#aaa' }}>—</div>}
+                </ul>
+              </Card>
+
+              <Card>
+                <SubTitle>เหตุผลกดดัน</SubTitle>
+                <ul style={{ marginTop: 8 }}>
+                  {human.neg.length ? human.neg.map((t, i) => <Bullet key={`n${i}`}>• {t}</Bullet>) : <div style={{ color:'#aaa' }}>—</div>}
+                </ul>
+              </Card>
+            </Grid>
+
+            {/* KPIs ล่าสุด + YoY/QoQ */}
+            <Grid style={{ marginTop: 12 }}>
+              <Kpi>
+                <div className="label">Revenue</div>
+                <div className="val">{fmt(latestMetrics.revenue, 0)}</div>
+                <div className="delta">YoY {fmt(yoy?.revenue)}% • QoQ {fmt(qoq?.revenue)}%</div>
+              </Kpi>
+              <Kpi>
+                <div className="label">EPS</div>
+                <div className="val">{fmt(latestMetrics.eps, 2)}</div>
+                <div className="delta">YoY {fmt(yoy?.eps)}% • QoQ {fmt(qoq?.eps)}%</div>
+              </Kpi>
+              <Kpi>
+                <div className="label">Gross Margin</div>
+                <div className="val">{fmt(latestMetrics.grossMarginPct, 2)}%</div>
+                <div className="delta">ΔYoY {fmt(yoy?.grossMarginPct,2)} pp • ΔQoQ {fmt(qoq?.grossMarginPct,2)} pp</div>
+              </Kpi>
+              <Kpi>
+                <div className="label">Net Profit Margin</div>
+                <div className="val">{fmt(latestMetrics.netMarginPct, 2)}%</div>
+                <div className="delta">ΔYoY {fmt(yoy?.netMarginPct,2)} pp • ΔQoQ {fmt(qoq?.netMarginPct,2)} pp</div>
+              </Kpi>
+              <Kpi>
+                <div className="label">ROE</div>
+                <div className="val">{fmt(latestMetrics.roePct, 2)}%</div>
+                <div className="delta">ΔYoY {fmt(yoy?.roePct,2)} pp • ΔQoQ {fmt(qoq?.roePct,2)} pp</div>
+              </Kpi>
+              <Kpi>
+                <div className="label">Debt / Equity</div>
+                <div className="val">{fmt(latestMetrics.d2e, 2)}x</div>
+                <div className="delta">
+                  ΔYoY {yoy?.d2e==null ? '—' : fmtDeltaDE(yoy.d2e)} • ΔQoQ {qoq?.d2e==null ? '—' : fmtDeltaDE(qoq.d2e)}
+                </div>
+              </Kpi>
+              <Kpi>
+                <div className="label">Operating CF</div>
+                <div className="val">{fmt(latestMetrics.ocf, 0)}</div>
+                <div className="delta">YoY {fmt(yoy?.ocf)}% • QoQ {fmt(qoq?.ocf)}%</div>
+              </Kpi>
+            </Grid>
+          </>
+        )}
+      </Card>
     </Page>
   );
 }
