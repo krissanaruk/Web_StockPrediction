@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 
@@ -44,6 +44,61 @@ const chooseBaseDelta = (latestSummary, lastRow) => {
 
 // แปลง ΔD/E จาก Δ×100 -> x (เช่น 7.00 -> 0.07x)
 const fmtDeltaDE = (v) => (v == null ? '—' : `${(v / 100).toFixed(2)}x`);
+
+// ===== คำนวณโดเมนแกน Y แบบไดนามิก (ไม่บังคับเริ่ม 0) =====
+const computeYDomain = (rows, key) => {
+  if (!rows?.length || !key) return ['dataMin', 'dataMax'];
+  let min = Infinity, max = -Infinity;
+  for (const r of rows) {
+    const v = Number(r[key]);
+    if (Number.isFinite(v)) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return ['dataMin', 'dataMax'];
+  const range = max - min;
+  const pad = Math.max(range * 0.06, 1); // เผื่อขอบ ~6% อย่างน้อย 1 หน่วย
+  return [Math.floor(min - pad), Math.ceil(max + pad)];
+};
+
+// ===== สร้าง “เส้นแบ่งไตรมาส” ตามช่วงวันที่ในกราฟ =====
+const pad2 = (n) => String(n).padStart(2, '0');
+const dateStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+const buildQuarterMarkers = (rows) => {
+  if (!rows?.length) return [];
+  const firstISO = rows[0].date;
+  const lastISO  = rows[rows.length - 1].date;
+  const first = new Date(firstISO);
+  const last  = new Date(lastISO);
+
+  const markers = [];
+  for (let y = first.getFullYear(); y <= last.getFullYear(); y++) {
+    for (const m of [0, 3, 6, 9]) {
+      const qStart = new Date(y, m, 1);
+      const qISO = dateStr(qStart);
+
+      // หา "วันที่ที่มีจริงในชุดข้อมูล" ที่ >= วันแรกของไตรมาส
+      const idx = rows.findIndex((r) => r.date >= qISO);
+      if (idx === -1) continue;
+
+      const x = rows[idx].date;
+      // ถ้าเส้นอยู่นอกช่วงข้อมูล ก็ข้าม
+      if (x < firstISO || x > lastISO) continue;
+
+      const qLabel = ['Q1', 'Q2', 'Q3', 'Q4'][m / 3];
+      markers.push({ x, label: qLabel });
+    }
+  }
+  // กำจัดรายการซ้ำที่อาจเกิดจากหลายวันตรงกัน
+  const uniq = [];
+  const seen = new Set();
+  for (const mk of markers) {
+    if (!seen.has(mk.x)) { seen.add(mk.x); uniq.push(mk); }
+  }
+  return uniq;
+};
 
 function buildReasons(d) {
   const pos = [], neg = [];
@@ -231,6 +286,10 @@ export default function Dashboard() {
     return [symbol];
   }, [chartRows, symbol]);
 
+  // ===== คำนวณ yDomain & เส้นแบ่งไตรมาส =====
+  const yDomain = useMemo(() => computeYDomain(chartRows, symbol), [chartRows, symbol]);
+  const quarterMarkers = useMemo(() => buildQuarterMarkers(chartRows), [chartRows]);
+
   /* ---------- เตรียมข้อมูลสรุป/เหตุผล ---------- */
   const latest = drivers?.summary || null;
   const lastRow = drivers?.data?.[drivers?.data?.length - 1] || null;
@@ -282,16 +341,34 @@ export default function Dashboard() {
         {/* กราฟราคาอย่างเดียว */}
         <div style={{ height: 420, marginTop: 8 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartRows} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+            <LineChart data={chartRows} margin={{ top: 18, right: 16, left: 0, bottom: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#333" />
               <XAxis dataKey="date" tick={{ fill: '#c9c9c9' }} tickFormatter={fmtDate} />
-              <YAxis tick={{ fill: '#c9c9c9' }} />
+              <YAxis
+                tick={{ fill: '#c9c9c9' }}
+                domain={yDomain}     // แกน Y แบบไดนามิก
+                allowDecimals
+                minTickGap={8}
+              />
               <Tooltip
                 formatter={(value, name) => [fmt(value), name]}
                 labelFormatter={(l) => `Date: ${fmtDate(l)}`}
                 contentStyle={{ background: '#2a2a2a', border: '1px solid #444', color: '#eee' }}
                 wrapperStyle={{ zIndex: 20 }}
               />
+
+              {/* เส้นแบ่งไตรมาส */}
+              {quarterMarkers.map((mk, i) => (
+                <ReferenceLine
+                  key={`qline-${mk.x}-${i}`}
+                  x={mk.x}
+                  stroke="#555"
+                  strokeDasharray="4 2"
+                  ifOverflow="extendDomain"
+                  label={{ value: mk.label, position: 'top', fill: '#9aa', fontSize: 10 }}
+                />
+              ))}
+
               {lines.map((k, idx) => (
                 <Line
                   key={`price-${k}`}
